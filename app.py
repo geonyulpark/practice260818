@@ -136,15 +136,29 @@ def append_history_multi(df: pd.DataFrame, worksheet_name: str, dedup_cols: list
 
 @st.cache_data(ttl=60)
 def read_history(worksheet_name: str) -> pd.DataFrame:
-    """이력 워크시트를 읽어 DataFrame으로 반환. 시트가 없으면 빈 DataFrame."""
+    """이력 워크시트를 읽어 DataFrame으로 반환. 시트가 없으면 빈 DataFrame.
+    시트가 실제 열 수보다 넓게 만들어져 뒤쪽에 제목 없는 빈 열이 남아있어도
+    (gspread의 get_all_records는 이 경우 '중복 헤더' 오류를 내므로) 직접 파싱해서 우회한다."""
     client = get_gsheet_client()
     sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
     try:
         ws = sh.worksheet(worksheet_name)
     except gspread.WorksheetNotFound:
         return pd.DataFrame()
-    records = ws.get_all_records()
-    return pd.DataFrame(records)
+
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame()
+
+    header = values[0]
+    while header and header[-1] == "":
+        header = header[:-1]
+    if not header:
+        return pd.DataFrame()
+
+    n = len(header)
+    data_rows = [row[:n] + [""] * (n - len(row)) for row in values[1:]]
+    return pd.DataFrame(data_rows, columns=header)
 
 
 def extract_effective_date(file_obj, sheet_name=None, max_rows=30):
@@ -192,11 +206,22 @@ def load_issuer_aliases() -> dict:
             ws = sh.worksheet(ALIAS_SHEET_NAME)
         except gspread.WorksheetNotFound:
             return {}
-        records = ws.get_all_records()
-        return {
-            str(r.get("별칭", "")).strip(): str(r.get("표준명", "")).strip()
-            for r in records if r.get("별칭") and r.get("표준명")
-        }
+        values = ws.get_all_values()
+        if not values:
+            return {}
+        header = values[0]
+        while header and header[-1] == "":
+            header = header[:-1]
+        if "별칭" not in header or "표준명" not in header:
+            return {}
+        alias_idx, canon_idx = header.index("별칭"), header.index("표준명")
+        result = {}
+        for row in values[1:]:
+            if len(row) > max(alias_idx, canon_idx):
+                alias, canon = row[alias_idx].strip(), row[canon_idx].strip()
+                if alias and canon:
+                    result[alias] = canon
+        return result
     except Exception:
         return {}
 
