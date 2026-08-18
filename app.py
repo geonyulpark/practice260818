@@ -84,6 +84,27 @@ if uploaded_file is not None:
     st.subheader("신용등급별 발행사 수")
     st.bar_chart(view["신용등급그룹"].value_counts())
 
+    # ------------------------------------------------------------
+    # 등급별 만기별 평균 수익률
+    # ------------------------------------------------------------
+    if maturity_cols:
+        st.subheader("등급별 만기별 평균 수익률")
+
+        # 등급 정렬 순서 (신용등급 표준 순서대로)
+        rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
+                         "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-"]
+
+        avg_by_rating = result.groupby("신용등급그룹")[maturity_cols].mean().round(3)
+        # 정의된 순서대로 정렬하되, 목록에 없는 등급은 뒤에 붙임
+        ordered = [r for r in rating_order if r in avg_by_rating.index]
+        remaining = [r for r in avg_by_rating.index if r not in rating_order]
+        avg_by_rating = avg_by_rating.loc[ordered + remaining]
+
+        st.dataframe(avg_by_rating, use_container_width=True)
+
+        st.caption("등급별 만기 수익률 곡선 (평균)")
+        st.line_chart(avg_by_rating.T)
+
     # 만기별 수익률 비교 (선택한 발행사 기준)
     if maturity_cols:
         st.subheader("발행사별 만기 수익률 비교")
