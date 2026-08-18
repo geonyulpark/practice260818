@@ -852,9 +852,12 @@ with tab3:
                             use_container_width=True, hide_index=True
                         )
 
-                        if not as_of_trigger.empty and "발행사(정규화)" in as_of_trigger.columns:
+                        if not as_of_trigger.empty and "원본발행사명" in as_of_trigger.columns:
                             norm_pick = normalize_issuer_name(pick_issuer)
-                            issuer_trigger = as_of_trigger[as_of_trigger["발행사(정규화)"] == norm_pick]
+                            # 저장 당시 얼어붙은 '발행사(정규화)' 값 대신, 원본발행사명을 지금 시점의
+                            # 최신 별칭(관리자 설정에서 추가된 것 포함)으로 다시 계산해서 매칭한다.
+                            live_normalized = as_of_trigger["원본발행사명"].apply(normalize_issuer_name)
+                            issuer_trigger = as_of_trigger[live_normalized == norm_pick]
                             st.markdown(f"**{pick_issuer} — 신용등급 변동 트리거 (해당 시점 기준)**")
                             if issuer_trigger.empty:
                                 st.caption("이 발행사에 대한 트리거 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
