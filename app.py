@@ -73,39 +73,63 @@ def extract_date_from_filename(filename: str):
 
 
 def append_history_multi(df: pd.DataFrame, worksheet_name: str, dedup_cols: list):
-    """df를 그대로(이미 필요한 날짜/기준일 열 포함) 워크시트에 추가.
-    dedup_cols 조합이 새 데이터에 이미 존재하는 기존 행은 먼저 지우고 새로 씀."""
+    """df를 워크시트에 추가. dedup_cols 조합이 새 데이터에 이미 존재하는 기존 행은 먼저 지우고 새로 씀.
+    시트의 기존 열 구성과 df의 열 구성이 다르면(예: 새 열이 추가된 경우), 열을 합쳐서
+    기존 행 전체를 새 구조로 재정렬(마이그레이션)한 뒤 다시 쓴다 — 열이 밀려서 어긋나는 것을 방지."""
     client = get_gsheet_client()
     sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+    new_cols = [str(c) for c in df.columns]
+
     try:
         ws = sh.worksheet(worksheet_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=worksheet_name, rows=3000, cols=max(30, len(df.columns)))
-        ws.append_row([str(c) for c in df.columns])
+        ws.append_row(new_cols)
+        new_rows = [[("" if pd.isna(v) else str(v)) for v in row] for row in df.values.tolist()]
+        if new_rows:
+            ws.append_rows(new_rows)
+        return
 
     existing = ws.get_all_values()
-    if existing:
-        header = existing[0]
-        data_rows = existing[1:]
-        if all(c in header for c in dedup_cols):
-            col_idx = [header.index(c) for c in dedup_cols]
-            new_keys = set(
-                tuple(("" if pd.isna(v) else str(v)) for v in row)
-                for row in df[dedup_cols].values.tolist()
-            )
-            keep_rows = [
-                row for row in data_rows
-                if tuple(row[i] if i < len(row) else "" for i in col_idx) not in new_keys
-            ]
-            if len(keep_rows) != len(data_rows):
-                ws.clear()
-                ws.append_row(header)
-                if keep_rows:
-                    ws.append_rows(keep_rows)
+    if not existing:
+        ws.append_row(new_cols)
+        existing_header, existing_rows = new_cols, []
     else:
-        ws.append_row([str(c) for c in df.columns])
+        existing_header, existing_rows = existing[0], existing[1:]
 
-    new_rows = [[("" if pd.isna(v) else str(v)) for v in row] for row in df.values.tolist()]
+    # 기존 헤더에 없는 새 열이 있으면 합쳐서 통합 헤더를 만든다 (기존 열 순서는 유지, 새 열은 뒤에 추가)
+    union_header = existing_header + [c for c in new_cols if c not in existing_header]
+
+    if union_header != existing_header:
+        migrated_rows = []
+        for row in existing_rows:
+            row_map = {existing_header[i]: (row[i] if i < len(row) else "") for i in range(len(existing_header))}
+            migrated_rows.append([row_map.get(c, "") for c in union_header])
+        existing_rows = migrated_rows
+
+    header = union_header
+
+    if all(c in header for c in dedup_cols):
+        col_idx = [header.index(c) for c in dedup_cols]
+        new_keys = set(
+            tuple(("" if pd.isna(v) else str(v)) for v in row)
+            for row in df[dedup_cols].values.tolist()
+        )
+        existing_rows = [
+            row for row in existing_rows
+            if tuple(row[i] if i < len(row) else "" for i in col_idx) not in new_keys
+        ]
+
+    df_reordered = df.reindex(columns=header)
+    new_rows = [
+        [("" if pd.isna(v) else str(v)) for v in row]
+        for row in df_reordered.values.tolist()
+    ]
+
+    ws.clear()
+    ws.append_row(header)
+    if existing_rows:
+        ws.append_rows(existing_rows)
     if new_rows:
         ws.append_rows(new_rows)
 
