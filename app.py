@@ -746,16 +746,20 @@ with tab3:
     else:
         col_a, col_b = st.columns([3, 1])
         with col_a:
-            query_date = st.text_input("조회할 날짜 (YYYYMMDD)", value=datetime.date.today().strftime("%Y%m%d"))
+            query_date_obj = st.date_input(
+                "조회할 날짜",
+                value=datetime.date.today(),
+                format="YYYY-MM-DD",
+            )
         with col_b:
             st.write("")
             st.write("")
             if st.button("새로고침 (최신 이력 다시 불러오기)"):
                 read_history.clear()
 
-        if not re.fullmatch(r"20\d{6}", query_date or ""):
-            st.error("날짜는 YYYYMMDD 8자리 숫자로 입력해주세요 (예: 20260814).")
-        else:
+        query_date = query_date_obj.strftime("%Y%m%d")
+
+        if True:  # 날짜 선택기 사용으로 형식 검증이 항상 통과하므로 기존 분기 구조만 유지
             try:
                 with st.spinner("이력을 불러오는 중입니다..."):
                     spread_hist = read_history("채권스프레드_이력")
