@@ -884,8 +884,11 @@ with tab3:
                             if issuer_trigger.empty:
                                 st.caption("이 발행사에 대한 트리거 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
                             else:
+                                display_cols = [c for c in
+                                    ["신평사", "기준일", "등급", "등급전망", "지표명", "방향", "원문", "특이조건"]
+                                    if c in issuer_trigger.columns]
                                 st.dataframe(
-                                    issuer_trigger[["신평사", "기준일", "등급", "등급전망", "지표명", "방향", "원문", "특이조건"]],
+                                    issuer_trigger[display_cols],
                                     use_container_width=True, hide_index=True
                                 )
 
