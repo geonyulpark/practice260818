@@ -44,15 +44,21 @@ if uploaded_file is not None:
 
     # ------------------------------------------------------------
     # 4. 보여줄 열 선택
+    #    - 15Y/20Y/30Y 제외
+    #    - "평가사" 열 제외
+    #    - 신용등급그룹은 "공모/무보증 " 접두어를 떼고 등급만 표시 (예: "A-")
     # ------------------------------------------------------------
     maturity_cols = ["3M", "6M", "9M", "1Y", "1.5Y", "2Y", "2.5Y",
-                      "3Y", "4Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"]
+                      "3Y", "4Y", "5Y", "7Y", "10Y"]
     maturity_cols = [c for c in maturity_cols if c in filtered.columns]
 
-    display_cols = [rating_col, issuer_col, "평가사"] + maturity_cols
+    display_cols = [rating_col, issuer_col] + maturity_cols
     display_cols = [c for c in display_cols if c in filtered.columns]
 
     result = filtered[display_cols].rename(columns={rating_col: "신용등급그룹"})
+    result["신용등급그룹"] = (
+        result["신용등급그룹"].astype(str).str.replace("공모/무보증", "", regex=False).str.strip()
+    )
 
     # ------------------------------------------------------------
     # 5. 사이드바 필터 (등급/발행사 검색)
