@@ -14,7 +14,9 @@ st.subheader("🧭 Compass")
 
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
-tab1, tab2, tab3 = st.tabs(["채권 스프레드 대시보드", "신용등급 변동 트리거", "일자별 통합 조회"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["채권 스프레드 대시보드", "신용등급 변동 트리거", "일자별 통합 조회", "⚙️ 관리자 설정"]
+)
 
 # ==============================================================
 # 공통 유틸
@@ -152,25 +154,71 @@ def extract_effective_date(file_obj, sheet_name=None, max_rows=30):
     return None
 
 
-# 발행사명 표기 차이 수동 매핑 — 자동 정규화로 안 잡히는 경우 여기에 추가하세요.
-# 형식: "파일에 나오는 표기": "통일해서 쓸 표준 표기"
-ISSUER_ALIASES = {
-    "디비증권": "DB증권",
-    "디비금융투자": "DB금융투자",
-    "디비손해보험": "DB손해보험",
-    "디비하이텍": "DB하이텍",
-    "씨제이씨지브이": "CJ CGV",
-}
+# 발행사명 표기 차이 매핑 — 이제 코드가 아니라 Google Sheets의 '발행사별칭' 탭에서 관리합니다.
+# 추가/수정/삭제는 대시보드의 '관리자 설정' 탭(비밀번호 필요)에서만 가능합니다.
+ALIAS_SHEET_NAME = "발행사별칭"
+
+@st.cache_data(ttl=300)
+def load_issuer_aliases() -> dict:
+    """Google Sheets '발행사별칭' 탭을 읽어 {별칭: 표준명} 딕셔너리로 반환. 실패 시 빈 딕셔너리."""
+    try:
+        client = get_gsheet_client()
+        sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+        try:
+            ws = sh.worksheet(ALIAS_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            return {}
+        records = ws.get_all_records()
+        return {
+            str(r.get("별칭", "")).strip(): str(r.get("표준명", "")).strip()
+            for r in records if r.get("별칭") and r.get("표준명")
+        }
+    except Exception:
+        return {}
+
+
+def add_issuer_alias(alias: str, canonical: str):
+    """새 별칭 한 행을 시트에 추가."""
+    client = get_gsheet_client()
+    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+    try:
+        ws = sh.worksheet(ALIAS_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=ALIAS_SHEET_NAME, rows=500, cols=2)
+        ws.append_row(["별칭", "표준명"])
+    ws.append_row([alias, canonical])
+    load_issuer_aliases.clear()
+
+
+def delete_issuer_alias(alias: str):
+    """별칭 값이 일치하는 행을 찾아 삭제."""
+    client = get_gsheet_client()
+    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+    ws = sh.worksheet(ALIAS_SHEET_NAME)
+    values = ws.get_all_values()
+    if not values:
+        return
+    header = values[0]
+    if "별칭" not in header:
+        return
+    alias_idx = header.index("별칭")
+    for row_num, row in enumerate(values[1:], start=2):  # 시트 1행은 헤더
+        if row_num - 2 < len(values) - 1 and alias_idx < len(row) and row[alias_idx] == alias:
+            ws.delete_rows(row_num)
+            break
+    load_issuer_aliases.clear()
+
 
 def normalize_issuer_name(name):
-    """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + 수동 별칭)."""
+    """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + Google Sheets 별칭)."""
     if pd.isna(name):
         return None
     s = str(name).strip()
     for suf in ["주식회사", "(주)", "㈜"]:
         s = s.replace(suf, "")
     s = s.strip()
-    return ISSUER_ALIASES.get(s, s)
+    aliases = load_issuer_aliases()
+    return aliases.get(s, s)
 
 
 # ==============================================================
@@ -534,32 +582,10 @@ with tab2:
             return "억원"
         return None
 
-    with st.expander("발행사명 별칭 추가 (표기 차이가 있는 회사를 직접 등록하고 싶을 때)"):
-        st.caption(
-            "예: 파일마다 '디비증권' / 'DB증권' / 'DB증권주식회사'처럼 표기가 다른 경우, "
-            "한 줄에 하나씩 '별칭 = 표준명' 형식으로 입력하세요."
-        )
-        alias_text = st.text_area(
-            "별칭 매핑 (선택사항)", height=100,
-            placeholder="디비증권 = DB증권\n한투증권 = 한국투자증권",
-            key="alias_input"
-        )
-
-    user_aliases = {}
-    if alias_text:
-        for line in alias_text.splitlines():
-            if "=" in line:
-                alias, canon = line.split("=", 1)
-                alias, canon = alias.strip(), canon.strip()
-                if alias and canon:
-                    user_aliases[alias] = canon
-
-    def resolve_issuer_name(raw_name):
-        """기본 정규화(공식 접미어 제거 + 코드 내장 별칭) 후, 사용자가 입력한 별칭까지 추가 반영."""
-        base = normalize_issuer_name(raw_name)
-        if base is None:
-            return None
-        return user_aliases.get(base, base)
+    st.caption(
+        "💡 회사명 표기 차이(별칭)는 이제 **'관리자 설정'** 탭에서 관리합니다. "
+        "새로운 표기 차이를 발견하시면 그 탭에서 추가해주세요."
+    )
 
     st.markdown("**5개 파일 업로드**")
     c1, c2 = st.columns(2)
@@ -587,7 +613,7 @@ with tab2:
                     if parsed is None:
                         continue
                     rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
+                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
@@ -607,7 +633,7 @@ with tab2:
                     if parsed is None:
                         continue
                     rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
+                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
@@ -634,7 +660,7 @@ with tab2:
                         if parsed is None:
                             continue
                         rows.append({"신평사": "나이스신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                      "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get(rating_col),
+                                      "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get(rating_col),
                                       "지표명": indicator, "방향": direction, **parsed,
                                       "단위": infer_unit(indicator, parsed["단위"])})
             except Exception as e:
@@ -654,7 +680,7 @@ with tab2:
                     if parsed is None:
                         continue
                     rows.append({"신평사": "한국기업평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
+                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
@@ -837,3 +863,82 @@ with tab3:
                                     issuer_trigger[["신평사", "기준일", "등급", "지표명", "방향", "원문", "특이조건"]],
                                     use_container_width=True, hide_index=True
                                 )
+
+
+# ==============================================================
+# TAB 4: 관리자 설정 (비밀번호로 잠금)
+# ==============================================================
+with tab4:
+    st.caption("이 탭은 발행사명 별칭 등 대시보드의 공용 설정을 관리하는 곳입니다. 비밀번호가 필요합니다.")
+
+    ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "")
+
+    if not ADMIN_PASSWORD:
+        st.warning(
+            "관리자 비밀번호가 설정되어 있지 않습니다. "
+            "Streamlit Cloud Secrets에 ADMIN_PASSWORD = \"원하는비밀번호\" 를 등록해주세요."
+        )
+    else:
+        pw_input = st.text_input("관리자 비밀번호", type="password", key="admin_pw")
+
+        if pw_input == "":
+            st.info("비밀번호를 입력하면 관리자 설정이 열립니다.")
+        elif pw_input != ADMIN_PASSWORD:
+            st.error("비밀번호가 올바르지 않습니다.")
+        else:
+            st.success("관리자 모드가 열렸습니다.")
+
+            if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+                st.warning("Google Sheets 연동 정보가 설정되어 있지 않아 별칭 관리를 사용할 수 없습니다.")
+            else:
+                st.subheader("발행사명 별칭 관리")
+                st.caption(
+                    "여기서 추가·삭제한 별칭은 Google Sheets에 즉시 저장되며, "
+                    "모든 사용자의 대시보드에 바로 반영됩니다 (배포/재시작 필요 없음)."
+                )
+
+                aliases = load_issuer_aliases()
+
+                if aliases:
+                    alias_df = pd.DataFrame(
+                        [{"별칭": k, "표준명": v} for k, v in sorted(aliases.items())]
+                    )
+                    st.dataframe(alias_df, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("등록된 별칭이 아직 없습니다.")
+
+                st.markdown("**새 별칭 추가**")
+                col_x, col_y, col_z = st.columns([2, 2, 1])
+                with col_x:
+                    new_alias = st.text_input("별칭 (파일에 나오는 표기)", key="new_alias_input")
+                with col_y:
+                    new_canonical = st.text_input("표준명 (통일해서 쓸 이름)", key="new_canonical_input")
+                with col_z:
+                    st.write("")
+                    st.write("")
+                    if st.button("추가", key="add_alias_btn"):
+                        if not new_alias.strip() or not new_canonical.strip():
+                            st.error("별칭과 표준명을 모두 입력해주세요.")
+                        else:
+                            try:
+                                add_issuer_alias(new_alias.strip(), new_canonical.strip())
+                                st.success(f"'{new_alias}' → '{new_canonical}' 추가되었습니다.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"추가 중 오류가 발생했습니다: {e}")
+
+                if aliases:
+                    st.markdown("**별칭 삭제**")
+                    col_p, col_q = st.columns([3, 1])
+                    with col_p:
+                        del_target = st.selectbox("삭제할 별칭 선택", options=sorted(aliases.keys()), key="del_alias_select")
+                    with col_q:
+                        st.write("")
+                        st.write("")
+                        if st.button("삭제", key="del_alias_btn"):
+                            try:
+                                delete_issuer_alias(del_target)
+                                st.success(f"'{del_target}' 삭제되었습니다.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"삭제 중 오류가 발생했습니다: {e}")
