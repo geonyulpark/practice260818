@@ -9,8 +9,8 @@ import xml.etree.ElementTree as ET
 import gspread
 from google.oauth2.service_account import Credentials
 
-st.set_page_config(page_title="크레딧 모니터링 대시보드", layout="wide")
-st.title("📊 크레딧 모니터링 대시보드")
+st.set_page_config(page_title="Compass", layout="wide")
+st.subheader("🧭 Compass")
 
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
