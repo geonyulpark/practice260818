@@ -44,21 +44,26 @@ if uploaded_file is not None:
 
     # ------------------------------------------------------------
     # 4. 보여줄 열 선택
-    #    - 15Y/20Y/30Y 제외
+    #    - 만기: 3M/6M/9M/1Y/3Y/5Y만 표시
     #    - "평가사" 열 제외
+    #    - 발행사 앞에 업종분류(소) 열 추가
     #    - 신용등급그룹은 "공모/무보증 " 접두어를 떼고 등급만 표시 (예: "A-")
     # ------------------------------------------------------------
-    maturity_cols = ["3M", "6M", "9M", "1Y", "1.5Y", "2Y", "2.5Y",
-                      "3Y", "4Y", "5Y", "7Y", "10Y"]
+    maturity_cols = ["3M", "6M", "9M", "1Y", "3Y", "5Y"]
     maturity_cols = [c for c in maturity_cols if c in filtered.columns]
 
-    display_cols = [rating_col, issuer_col] + maturity_cols
+    industry_col = "업종분류(소)"
+
+    display_cols = [rating_col, industry_col, issuer_col] + maturity_cols
     display_cols = [c for c in display_cols if c in filtered.columns]
 
-    result = filtered[display_cols].rename(columns={rating_col: "신용등급그룹"})
+    result = filtered[display_cols].rename(
+        columns={rating_col: "신용등급그룹", industry_col: "업종구분"}
+    )
     result["신용등급그룹"] = (
         result["신용등급그룹"].astype(str).str.replace("공모/무보증", "", regex=False).str.strip()
     )
+    result["업종구분"] = result["업종구분"].fillna("미분류")
 
     # ------------------------------------------------------------
     # 5. 필터 (표 바로 위에 배치 — 등급 선택 + 발행사 선택)
