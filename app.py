@@ -14,7 +14,7 @@ st.title("📊 크레딧 모니터링 대시보드")
 
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
-tab1, tab2 = st.tabs(["채권 스프레드 대시보드", "신용등급 변동 트리거"])
+tab1, tab2, tab3 = st.tabs(["채권 스프레드 대시보드", "신용등급 변동 트리거", "일자별 통합 조회"])
 
 # ==============================================================
 # 공통 유틸
@@ -68,6 +68,88 @@ def extract_date_from_filename(filename: str):
     if m:
         return m.group(1)
     return datetime.date.today().strftime("%Y%m%d")
+
+
+def append_history_multi(df: pd.DataFrame, worksheet_name: str, dedup_cols: list):
+    """df를 그대로(이미 필요한 날짜/기준일 열 포함) 워크시트에 추가.
+    dedup_cols 조합이 새 데이터에 이미 존재하는 기존 행은 먼저 지우고 새로 씀."""
+    client = get_gsheet_client()
+    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+    try:
+        ws = sh.worksheet(worksheet_name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=worksheet_name, rows=3000, cols=max(30, len(df.columns)))
+        ws.append_row([str(c) for c in df.columns])
+
+    existing = ws.get_all_values()
+    if existing:
+        header = existing[0]
+        data_rows = existing[1:]
+        if all(c in header for c in dedup_cols):
+            col_idx = [header.index(c) for c in dedup_cols]
+            new_keys = set(
+                tuple(("" if pd.isna(v) else str(v)) for v in row)
+                for row in df[dedup_cols].values.tolist()
+            )
+            keep_rows = [
+                row for row in data_rows
+                if tuple(row[i] if i < len(row) else "" for i in col_idx) not in new_keys
+            ]
+            if len(keep_rows) != len(data_rows):
+                ws.clear()
+                ws.append_row(header)
+                if keep_rows:
+                    ws.append_rows(keep_rows)
+    else:
+        ws.append_row([str(c) for c in df.columns])
+
+    new_rows = [[("" if pd.isna(v) else str(v)) for v in row] for row in df.values.tolist()]
+    if new_rows:
+        ws.append_rows(new_rows)
+
+
+@st.cache_data(ttl=60)
+def read_history(worksheet_name: str) -> pd.DataFrame:
+    """이력 워크시트를 읽어 DataFrame으로 반환. 시트가 없으면 빈 DataFrame."""
+    client = get_gsheet_client()
+    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+    try:
+        ws = sh.worksheet(worksheet_name)
+    except gspread.WorksheetNotFound:
+        return pd.DataFrame()
+    records = ws.get_all_records()
+    return pd.DataFrame(records)
+
+
+def extract_effective_date(file_obj, sheet_name=None, max_rows=30):
+    """엑셀 파일 상단 텍스트에서 '기준일/기준시점/유효시점' 뒤에 오는 날짜를 찾아 YYYYMMDD로 반환."""
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+    try:
+        raw = pd.read_excel(file_obj, sheet_name=sheet_name, header=None, nrows=max_rows)
+    except Exception:
+        return None
+    finally:
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+    keywords = ["기준일", "기준시점", "유효시점"]
+    for i in range(len(raw)):
+        for v in raw.iloc[i].dropna():
+            text = str(v)
+            if any(k in text for k in keywords):
+                m = re.search(r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', text)
+                if m:
+                    y, mo, d = m.groups()
+                    return f"{y}{int(mo):02d}{int(d):02d}"
+                m = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', text)
+                if m:
+                    y, mo, d = m.groups()
+                    return f"{y}{int(mo):02d}{int(d):02d}"
+    return None
 
 
 # 발행사명 표기 차이 수동 매핑 — 자동 정규화로 안 잡히는 경우 여기에 추가하세요.
@@ -492,6 +574,7 @@ with tab2:
     # --- 한신평 기업부문 ---
     if f_is_corp is not None:
         try:
+            eff_date = extract_effective_date(f_is_corp, sheet_name='업체별 KMI 지표 및 실적')
             df = pd.read_excel(f_is_corp, sheet_name='업체별 KMI 지표 및 실적', header=13)
             for _, r in df.iterrows():
                 issuer, indicator = r.get('업체명'), r.get('KMI 지표')
@@ -501,7 +584,7 @@ with tab2:
                     parsed = parse_threshold(r.get(col))
                     if parsed is None:
                         continue
-                    rows.append({"신평사": "한국신용평가", "원본발행사명": issuer,
+                    rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
                                   "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
@@ -511,6 +594,7 @@ with tab2:
     # --- 한신평 금융부문 ---
     if f_is_fin is not None:
         try:
+            eff_date = extract_effective_date(f_is_fin, sheet_name='업체별 KMI 지표 및 실적')
             df = pd.read_excel(f_is_fin, sheet_name='업체별 KMI 지표 및 실적', header=13)
             for _, r in df.iterrows():
                 issuer, indicator = r.get('업체명'), r.get('KMI')
@@ -520,7 +604,7 @@ with tab2:
                     parsed = parse_threshold(r.get(col))
                     if parsed is None:
                         continue
-                    rows.append({"신평사": "한국신용평가", "원본발행사명": issuer,
+                    rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
                                   "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
@@ -531,6 +615,7 @@ with tab2:
     for f, label in [(f_nice_corp, "NICE(기업)"), (f_nice_fin, "NICE(금융)")]:
         if f is not None:
             try:
+                eff_date = extract_effective_date(f, sheet_name=0)
                 df = pd.read_excel(f, header=12)
                 df.columns = [str(c).strip() for c in df.columns]
                 issuer_col = df.columns[1]
@@ -546,7 +631,7 @@ with tab2:
                         parsed = parse_threshold(r.get(col))
                         if parsed is None:
                             continue
-                        rows.append({"신평사": "나이스신용평가", "원본발행사명": issuer,
+                        rows.append({"신평사": "나이스신용평가", "기준일": eff_date, "원본발행사명": issuer,
                                       "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get(rating_col),
                                       "지표명": indicator, "방향": direction, **parsed,
                                       "단위": infer_unit(indicator, parsed["단위"])})
@@ -556,6 +641,7 @@ with tab2:
     # --- 한기평(KR) ---
     if f_kr is not None:
         try:
+            eff_date = extract_effective_date(f_kr, sheet_name='Sheet1')
             df = pd.read_excel(f_kr, sheet_name='Sheet1', header=25)
             for _, r in df.iterrows():
                 issuer, indicator = r.get('업체명'), r.get('등급변동요인')
@@ -565,7 +651,7 @@ with tab2:
                     parsed = parse_threshold(r.get(col))
                     if parsed is None:
                         continue
-                    rows.append({"신평사": "한국기업평가", "원본발행사명": issuer,
+                    rows.append({"신평사": "한국기업평가", "기준일": eff_date, "원본발행사명": issuer,
                                   "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
@@ -576,6 +662,9 @@ with tab2:
         unified = pd.DataFrame(rows)
         st.success(f"총 {len(unified)}개 트리거 항목을 통합했습니다 (신평사 {unified['신평사'].nunique()}개사).")
 
+        date_summary = unified.groupby("신평사")["기준일"].first()
+        st.caption("신평사별 인식된 기준일: " + ", ".join(f"{k} {v}" for k, v in date_summary.items()))
+
         st.subheader("발행사 검색")
         search = st.text_input("발행사명 입력 (부분 검색 가능)", key="trigger_search")
 
@@ -585,7 +674,7 @@ with tab2:
             hit = unified
 
         st.dataframe(
-            hit[["발행사(정규화)", "원본발행사명", "신평사", "등급", "지표명", "방향", "원문", "연산자", "값", "단위", "특이조건"]],
+            hit[["발행사(정규화)", "원본발행사명", "신평사", "기준일", "등급", "지표명", "방향", "원문", "연산자", "값", "단위", "특이조건"]],
             use_container_width=True, hide_index=True
         )
 
@@ -606,5 +695,139 @@ with tab2:
             data=unified.to_csv(index=False).encode("utf-8-sig"),
             file_name="신용등급_변동트리거_통합.csv", mime="text/csv"
         )
+
+        # ------------------------------------------------------------
+        # 이력 저장 (Google Sheets 누적) — 분기 단위 기준일로 저장
+        # ------------------------------------------------------------
+        st.subheader("이력 저장 (선택사항)")
+        st.caption(
+            "각 신평사 파일 안에서 자동으로 인식한 기준일 기준으로 저장됩니다. "
+            "같은 (신평사, 기준일) 조합이 이미 있으면 그 부분만 덮어씁니다."
+        )
+        if st.button("이력에 저장", key="save_trigger_history_btn"):
+            if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+                st.warning(
+                    "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+                    "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+                )
+            elif unified["기준일"].isna().any():
+                missing = unified[unified["기준일"].isna()]["신평사"].unique()
+                st.error(
+                    f"다음 신평사 파일에서 기준일을 자동으로 못 찾았습니다: {', '.join(missing)}. "
+                    "파일 형식을 확인해주세요 (기준일 저장은 건너뛰었습니다)."
+                )
+            else:
+                try:
+                    with st.spinner("Google Sheets에 저장하는 중입니다..."):
+                        append_history_multi(unified, "신용등급트리거_이력", dedup_cols=["신평사", "기준일"])
+                    read_history.clear()
+                    st.success(f"{len(unified)}건을 이력에 저장했습니다.")
+                except Exception as e:
+                    st.error(f"저장 중 오류가 발생했습니다: {e}")
     else:
         st.info("왼쪽에서 신평사 파일을 하나 이상 업로드하면 통합 결과가 표시됩니다.")
+
+
+# ==============================================================
+# TAB 3: 일자별 통합 조회
+# ==============================================================
+with tab3:
+    st.caption(
+        "특정 날짜를 기준으로, 그날의 채권 스프레드와 그 시점에 유효했던(가장 최근 발표된) "
+        "신용등급 변동 트리거를 함께 보여줍니다. 두 이력 모두 Google Sheets에 미리 저장되어 있어야 합니다."
+    )
+
+    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+        st.warning(
+            "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+            "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+        )
+    else:
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            query_date = st.text_input("조회할 날짜 (YYYYMMDD)", value=datetime.date.today().strftime("%Y%m%d"))
+        with col_b:
+            st.write("")
+            st.write("")
+            if st.button("새로고침 (최신 이력 다시 불러오기)"):
+                read_history.clear()
+
+        if not re.fullmatch(r"20\d{6}", query_date or ""):
+            st.error("날짜는 YYYYMMDD 8자리 숫자로 입력해주세요 (예: 20260814).")
+        else:
+            try:
+                with st.spinner("이력을 불러오는 중입니다..."):
+                    spread_hist = read_history("채권스프레드_이력")
+                    trigger_hist = read_history("신용등급트리거_이력")
+            except Exception as e:
+                st.error(f"이력을 불러오는 중 오류가 발생했습니다: {e}")
+                spread_hist = pd.DataFrame()
+                trigger_hist = pd.DataFrame()
+
+            # --- 그날의 채권 스프레드 ---
+            st.subheader(f"{query_date} 기준 채권 스프레드")
+            if spread_hist.empty or "업데이트일자" not in spread_hist.columns:
+                st.info("저장된 채권 스프레드 이력이 없습니다. 먼저 '채권 스프레드 대시보드' 탭에서 저장해주세요.")
+                day_spread = pd.DataFrame()
+            else:
+                day_spread = spread_hist[spread_hist["업데이트일자"].astype(str) == query_date]
+                if day_spread.empty:
+                    available_dates = sorted(spread_hist["업데이트일자"].astype(str).unique())
+                    st.info(
+                        f"{query_date} 날짜의 저장된 데이터가 없습니다. "
+                        f"저장된 날짜: {', '.join(available_dates[-10:])}"
+                        + (" ..." if len(available_dates) > 10 else "")
+                    )
+                else:
+                    st.dataframe(day_spread.drop(columns=["업데이트일자"]), use_container_width=True, hide_index=True)
+
+            # --- 해당 시점 기준 최신 트리거 (신평사별로 기준일 <= query_date 중 최댓값) ---
+            st.subheader(f"{query_date} 시점 기준 유효한 신용등급 변동 트리거")
+            if trigger_hist.empty or "기준일" not in trigger_hist.columns:
+                st.info("저장된 트리거 이력이 없습니다. 먼저 '신용등급 변동 트리거' 탭에서 저장해주세요.")
+                as_of_trigger = pd.DataFrame()
+            else:
+                th = trigger_hist.copy()
+                th["기준일"] = th["기준일"].astype(str)
+                th_valid = th[th["기준일"] <= query_date]
+                if th_valid.empty:
+                    st.info(f"{query_date} 이전에 저장된 트리거 이력이 없습니다.")
+                    as_of_trigger = pd.DataFrame()
+                else:
+                    # 신평사별로 query_date 이하 중 가장 최근 기준일만 사용
+                    latest_by_rater = th_valid.groupby("신평사")["기준일"].max()
+                    st.caption(
+                        "신평사별로 적용된 기준일: "
+                        + ", ".join(f"{k} ({v})" for k, v in latest_by_rater.items())
+                    )
+                    keep_mask = th_valid.apply(
+                        lambda row: row["기준일"] == latest_by_rater[row["신평사"]], axis=1
+                    )
+                    as_of_trigger = th_valid[keep_mask]
+
+            # --- 발행사 선택해서 둘을 한 화면에 ---
+            if not day_spread.empty:
+                st.subheader("발행사별 상세 보기")
+                issuer_col_name = "발행사" if "발행사" in day_spread.columns else None
+                if issuer_col_name:
+                    pick_issuer = st.selectbox(
+                        "발행사 선택", options=sorted(day_spread[issuer_col_name].dropna().unique())
+                    )
+                    if pick_issuer:
+                        st.markdown(f"**{pick_issuer} — 채권 스프레드 ({query_date})**")
+                        st.dataframe(
+                            day_spread[day_spread[issuer_col_name] == pick_issuer].drop(columns=["업데이트일자"]),
+                            use_container_width=True, hide_index=True
+                        )
+
+                        if not as_of_trigger.empty and "발행사(정규화)" in as_of_trigger.columns:
+                            norm_pick = normalize_issuer_name(pick_issuer)
+                            issuer_trigger = as_of_trigger[as_of_trigger["발행사(정규화)"] == norm_pick]
+                            st.markdown(f"**{pick_issuer} — 신용등급 변동 트리거 (해당 시점 기준)**")
+                            if issuer_trigger.empty:
+                                st.caption("이 발행사에 대한 트리거 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
+                            else:
+                                st.dataframe(
+                                    issuer_trigger[["신평사", "기준일", "등급", "지표명", "방향", "원문", "특이조건"]],
+                                    use_container_width=True, hide_index=True
+                                )
