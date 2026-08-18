@@ -159,6 +159,7 @@ ISSUER_ALIASES = {
     "디비금융투자": "DB금융투자",
     "디비손해보험": "DB손해보험",
     "디비하이텍": "DB하이텍",
+    "씨제이씨지브이": "CJ CGV",
 }
 
 def normalize_issuer_name(name):
