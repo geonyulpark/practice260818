@@ -61,18 +61,28 @@ if uploaded_file is not None:
     )
 
     # ------------------------------------------------------------
-    # 5. 사이드바 필터 (등급/발행사 검색)
+    # 5. 필터 (표 바로 위에 배치 — 등급 선택 + 발행사 선택)
     # ------------------------------------------------------------
-    st.sidebar.header("추가 필터")
-    rating_options = sorted(result["신용등급그룹"].unique())
-    selected_ratings = st.sidebar.multiselect(
-        "신용등급 선택", options=rating_options, default=rating_options
-    )
-    search_issuer = st.sidebar.text_input("발행사명 검색")
+    st.subheader("필터")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        rating_options = sorted(result["신용등급그룹"].unique())
+        selected_ratings = st.multiselect(
+            "신용등급 선택", options=rating_options, default=rating_options
+        )
+
+    # 선택된 등급에 해당하는 발행사만 옵션으로 제공
+    issuer_pool = result[result["신용등급그룹"].isin(selected_ratings)][issuer_col].sort_values().unique()
+
+    with col2:
+        selected_issuers = st.multiselect(
+            "발행사 선택 (비워두면 전체 표시)", options=issuer_pool
+        )
 
     view = result[result["신용등급그룹"].isin(selected_ratings)]
-    if search_issuer:
-        view = view[view[issuer_col].str.contains(search_issuer, na=False)]
+    if selected_issuers:
+        view = view[view[issuer_col].isin(selected_issuers)]
 
     # ------------------------------------------------------------
     # 6. 결과 표시
