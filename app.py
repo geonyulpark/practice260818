@@ -358,6 +358,7 @@ with tab1:
             st.error(info)
             st.stop()
         maturity_cols = info
+        issuer_col = '발행사'
 
         st.subheader("필터")
         col0, col1, col2 = st.columns(3)
