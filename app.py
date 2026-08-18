@@ -582,6 +582,24 @@ with tab2:
             return "억원"
         return None
 
+    NICE_OUTLOOK_MAP = {"S": "안정적", "P": "긍정적", "N": "부정적"}
+
+    def split_rating_outlook(raw, source):
+        """'A+/안정적', 'AA-/S' 같은 표기를 (등급, 등급전망)으로 분리.
+        NICE는 알파벳 코드(S/P/N)를 한글로 변환, 한신평은 이미 한글이라 그대로 사용."""
+        if pd.isna(raw):
+            return None, None
+        text = str(raw).strip()
+        if "/" not in text:
+            return text, None
+        grade, outlook_code = text.split("/", 1)
+        grade, outlook_code = grade.strip(), outlook_code.strip()
+        if source == "나이스신용평가":
+            outlook = NICE_OUTLOOK_MAP.get(outlook_code, outlook_code)
+        else:
+            outlook = outlook_code
+        return grade, outlook
+
     st.caption(
         "💡 회사명 표기 차이(별칭)는 이제 **'관리자 설정'** 탭에서 관리합니다. "
         "새로운 표기 차이를 발견하시면 그 탭에서 추가해주세요."
@@ -612,8 +630,9 @@ with tab2:
                     parsed = parse_threshold(r.get(col))
                     if parsed is None:
                         continue
+                    grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
                     rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
+                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
@@ -632,8 +651,9 @@ with tab2:
                     parsed = parse_threshold(r.get(col))
                     if parsed is None:
                         continue
+                    grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
                     rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
+                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
@@ -659,8 +679,9 @@ with tab2:
                         parsed = parse_threshold(r.get(col))
                         if parsed is None:
                             continue
+                        grade, outlook = split_rating_outlook(r.get(rating_col), "나이스신용평가")
                         rows.append({"신평사": "나이스신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                      "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get(rating_col),
+                                      "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
                                       "지표명": indicator, "방향": direction, **parsed,
                                       "단위": infer_unit(indicator, parsed["단위"])})
             except Exception as e:
@@ -681,6 +702,7 @@ with tab2:
                         continue
                     rows.append({"신평사": "한국기업평가", "기준일": eff_date, "원본발행사명": issuer,
                                   "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
+                                  "등급전망": r.get('등급전망'),
                                   "지표명": indicator, "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
@@ -702,7 +724,7 @@ with tab2:
             hit = unified
 
         st.dataframe(
-            hit[["발행사(정규화)", "원본발행사명", "신평사", "기준일", "등급", "지표명", "방향", "원문", "연산자", "값", "단위", "특이조건"]],
+            hit[["발행사(정규화)", "원본발행사명", "신평사", "기준일", "등급", "등급전망", "지표명", "방향", "원문", "연산자", "값", "단위", "특이조건"]],
             use_container_width=True, hide_index=True
         )
 
@@ -863,7 +885,7 @@ with tab3:
                                 st.caption("이 발행사에 대한 트리거 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
                             else:
                                 st.dataframe(
-                                    issuer_trigger[["신평사", "기준일", "등급", "지표명", "방향", "원문", "특이조건"]],
+                                    issuer_trigger[["신평사", "기준일", "등급", "등급전망", "지표명", "방향", "원문", "특이조건"]],
                                     use_container_width=True, hide_index=True
                                 )
 
