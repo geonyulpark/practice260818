@@ -3,158 +3,171 @@ import pandas as pd
 import requests
 import zipfile
 import io
+import re
 import datetime
 import xml.etree.ElementTree as ET
+import gspread
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="크레딧 모니터링 대시보드", layout="wide")
-
 st.title("📊 크레딧 모니터링 대시보드")
-st.caption("인포맥스 채권 수익률 파일을 업로드하면 '공모/무보증' 발행사만 자동으로 필터링해 보여줍니다.")
 
-# ==============================================================
-# DART API 관련 함수
-# ==============================================================
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
-@st.cache_data(ttl=60 * 60 * 24)  # 24시간 캐시 (고유번호 목록은 하루 한 번이면 충분)
-def load_corp_code_map(api_key: str):
-    """DART 고유번호(corp_code) 전체 목록을 받아 {회사명: corp_code} 딕셔너리로 반환."""
-    url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={api_key}"
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    zf = zipfile.ZipFile(io.BytesIO(resp.content))
-    xml_bytes = zf.read(zf.namelist()[0])
-    root = ET.fromstring(xml_bytes)
-
-    mapping = {}
-    for item in root.findall("list"):
-        corp_name = (item.findtext("corp_name") or "").strip()
-        corp_code = (item.findtext("corp_code") or "").strip()
-        if corp_name and corp_code:
-            mapping[corp_name] = corp_code
-    return mapping
-
-
-def find_corp_code(issuer_name: str, corp_map: dict):
-    """발행사명을 DART 고유번호와 매칭. 정확일치 → 접미사 제거 재시도 → 부분일치 순."""
-    if issuer_name in corp_map:
-        return corp_map[issuer_name]
-
-    for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
-        candidate = issuer_name.replace(suffix, "").strip()
-        if candidate in corp_map:
-            return corp_map[candidate]
-
-    # 부분일치 (발행사명이 짧아 여러 후보가 잡힐 수 있어 마지막 수단으로만 사용)
-    candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
-    if len(candidates) == 1:
-        return corp_map[candidates[0]]
-    return None
-
-
-@st.cache_data(ttl=60 * 60 * 24)  # 24시간 캐시 (하루 한 번 갱신되면 충분)
-def fetch_financials(corp_code: str, api_key: str):
-    """가장 최근 분기 → 반기 → 사업보고서 순으로 매출액/영업이익/당기순이익 조회."""
-    if not corp_code:
-        return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "매칭 실패"}
-
-    this_year = datetime.date.today().year
-    attempts = []
-    for year in [this_year, this_year - 1]:
-        attempts += [
-            (year, "11014", f"{year} 3분기보고서"),
-            (year, "11012", f"{year} 반기보고서"),
-            (year, "11013", f"{year} 1분기보고서"),
-            (year, "11011", f"{year} 사업보고서"),
-        ]
-
-    url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
-
-    for year, reprt_code, label in attempts:
-        for fs_div in ["CFS", "OFS"]:  # 연결재무제표 우선, 없으면 개별재무제표
-            params = {
-                "crtfc_key": api_key,
-                "corp_code": corp_code,
-                "bsns_year": str(year),
-                "reprt_code": reprt_code,
-                "fs_div": fs_div,
-            }
-            try:
-                resp = requests.get(url, params=params, timeout=15)
-                data = resp.json()
-            except Exception:
-                continue
-
-            if data.get("status") != "000":
-                continue
-
-            revenue = op_income = net_income = None
-            for row in data.get("list", []):
-                if row.get("sj_div") != "IS":
-                    continue
-                name = row.get("account_nm", "")
-                raw = (row.get("thstrm_amount") or "").replace(",", "")
-                try:
-                    amt = int(raw)
-                except ValueError:
-                    continue
-                if name in ("매출액", "수익(매출액)", "영업수익"):
-                    revenue = amt
-                elif name == "영업이익":
-                    op_income = amt
-                elif name in ("당기순이익", "당기순이익(손실)"):
-                    net_income = amt
-
-            if revenue is not None or op_income is not None or net_income is not None:
-                return {
-                    "매출액": revenue, "영업이익": op_income, "당기순이익": net_income,
-                    "재무제표기준일": label
-                }
-
-    return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "조회 실패"}
-
+tab1, tab2 = st.tabs(["채권 스프레드 대시보드", "신용등급 변동 트리거"])
 
 # ==============================================================
-# 1. 파일 업로드
+# 공통 유틸
 # ==============================================================
-uploaded_file = st.file_uploader(
-    "인포맥스 엑셀 파일을 업로드하세요 (예: 4788-YYYYMMDD.xlsx)",
-    type=["xlsx", "xls"]
-)
 
-if uploaded_file is not None:
-    # ------------------------------------------------------------
-    # 2. 데이터 읽기
-    #    인포맥스 파일은 3번째 줄(0-indexed: 2)이 실제 헤더입니다.
-    # ------------------------------------------------------------
+GOOGLE_SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+@st.cache_resource
+def get_gsheet_client():
+    """구글 서비스 계정으로 인증된 gspread 클라이언트 반환 (세션 내 재사용)."""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=GOOGLE_SHEETS_SCOPES)
+    return gspread.authorize(creds)
+
+
+def append_history(df: pd.DataFrame, worksheet_name: str, date_str: str, date_col: str = "업데이트일자"):
+    """df를 지정한 워크시트에 날짜열과 함께 이력으로 쌓는다.
+    같은 날짜(date_str) 데이터가 이미 있으면 먼저 지우고 새로 씀 (재업로드시 중복 방지)."""
+    client = get_gsheet_client()
+    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
     try:
-        df = pd.read_excel(uploaded_file, header=2)
-    except Exception as e:
-        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-        st.stop()
+        ws = sh.worksheet(worksheet_name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=max(30, len(df.columns) + 1))
+        ws.append_row([date_col] + [str(c) for c in df.columns])
 
-    rating_col = df.columns[4]      # E열: 채권그룹(신용등급 포함)
-    issuer_col = '발행사'
+    existing = ws.get_all_values()
+    if existing:
+        header = existing[0]
+        data_rows = existing[1:]
+        keep_rows = [row for row in data_rows if row and row[0] != date_str]
+        if len(keep_rows) != len(data_rows):
+            ws.clear()
+            ws.append_row(header)
+            if keep_rows:
+                ws.append_rows(keep_rows)
+    else:
+        ws.append_row([date_col] + [str(c) for c in df.columns])
 
-    if rating_col not in df.columns or issuer_col not in df.columns:
-        st.error("예상한 열 구조와 다릅니다. 파일 형식을 확인해주세요.")
-        st.stop()
+    new_rows = [[date_str] + [("" if pd.isna(v) else str(v)) for v in row] for row in df.values.tolist()]
+    if new_rows:
+        ws.append_rows(new_rows)
 
-    # ------------------------------------------------------------
-    # 3. "공모/무보증" 필터링
-    # ------------------------------------------------------------
-    mask_rating = df[rating_col].astype(str).str.contains("공모/무보증", na=False)
-    filtered = df[mask_rating].copy()
-    filtered = filtered[filtered[issuer_col] != filtered[rating_col]]
 
-    # ------------------------------------------------------------
-    # 4. 보여줄 열 선택 + 산업대분류 매핑
-    # ------------------------------------------------------------
-    maturity_cols = ["3M", "6M", "9M", "1Y", "3Y", "5Y"]
-    maturity_cols = [c for c in maturity_cols if c in filtered.columns]
+def extract_date_from_filename(filename: str):
+    """파일명에서 8자리 날짜(YYYYMMDD)를 찾아 반환, 없으면 오늘 날짜."""
+    m = re.search(r'(20\d{6})', filename or "")
+    if m:
+        return m.group(1)
+    return datetime.date.today().strftime("%Y%m%d")
 
-    industry_col = "업종분류(소)"
-    industry_code_col = "업종코드"
+
+# 발행사명 표기 차이 수동 매핑 — 자동 정규화로 안 잡히는 경우 여기에 추가하세요.
+# 형식: "파일에 나오는 표기": "통일해서 쓸 표준 표기"
+ISSUER_ALIASES = {
+    "디비증권": "DB증권",
+    "디비금융투자": "DB금융투자",
+    "디비손해보험": "DB손해보험",
+    "디비하이텍": "DB하이텍",
+}
+
+def normalize_issuer_name(name):
+    """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + 수동 별칭)."""
+    if pd.isna(name):
+        return None
+    s = str(name).strip()
+    for suf in ["주식회사", "(주)", "㈜"]:
+        s = s.replace(suf, "")
+    s = s.strip()
+    return ISSUER_ALIASES.get(s, s)
+
+
+# ==============================================================
+# TAB 1: 채권 스프레드 대시보드 (기존 기능)
+# ==============================================================
+with tab1:
+    st.caption("인포맥스 채권 수익률 파일을 업로드하면 '공모/무보증' 발행사만 자동으로 필터링해 보여줍니다.")
+
+    @st.cache_data(ttl=60 * 60 * 24)
+    def load_corp_code_map(api_key: str):
+        url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={api_key}"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        xml_bytes = zf.read(zf.namelist()[0])
+        root = ET.fromstring(xml_bytes)
+        mapping = {}
+        for item in root.findall("list"):
+            corp_name = (item.findtext("corp_name") or "").strip()
+            corp_code = (item.findtext("corp_code") or "").strip()
+            if corp_name and corp_code:
+                mapping[corp_name] = corp_code
+        return mapping
+
+    def find_corp_code(issuer_name: str, corp_map: dict):
+        if issuer_name in corp_map:
+            return corp_map[issuer_name]
+        for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
+            candidate = issuer_name.replace(suffix, "").strip()
+            if candidate in corp_map:
+                return corp_map[candidate]
+        candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
+        if len(candidates) == 1:
+            return corp_map[candidates[0]]
+        return None
+
+    @st.cache_data(ttl=60 * 60 * 24)
+    def fetch_financials(corp_code: str, api_key: str):
+        if not corp_code:
+            return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "매칭 실패"}
+        this_year = datetime.date.today().year
+        attempts = []
+        for year in [this_year, this_year - 1]:
+            attempts += [
+                (year, "11014", f"{year} 3분기보고서"),
+                (year, "11012", f"{year} 반기보고서"),
+                (year, "11013", f"{year} 1분기보고서"),
+                (year, "11011", f"{year} 사업보고서"),
+            ]
+        url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+        for year, reprt_code, label in attempts:
+            for fs_div in ["CFS", "OFS"]:
+                params = {"crtfc_key": api_key, "corp_code": corp_code,
+                          "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div}
+                try:
+                    resp = requests.get(url, params=params, timeout=15)
+                    data = resp.json()
+                except Exception:
+                    continue
+                if data.get("status") != "000":
+                    continue
+                revenue = op_income = net_income = None
+                for row in data.get("list", []):
+                    if row.get("sj_div") != "IS":
+                        continue
+                    name = row.get("account_nm", "")
+                    raw = (row.get("thstrm_amount") or "").replace(",", "")
+                    try:
+                        amt = int(raw)
+                    except ValueError:
+                        continue
+                    if name in ("매출액", "수익(매출액)", "영업수익"):
+                        revenue = amt
+                    elif name == "영업이익":
+                        op_income = amt
+                    elif name in ("당기순이익", "당기순이익(손실)"):
+                        net_income = amt
+                if revenue is not None or op_income is not None or net_income is not None:
+                    return {"매출액": revenue, "영업이익": op_income, "당기순이익": net_income, "재무제표기준일": label}
+        return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "조회 실패"}
 
     KSIC_LARGE = {
         "A": "농업, 임업 및 어업", "B": "광업", "C": "제조업",
@@ -167,147 +180,431 @@ if uploaded_file is not None:
         "R": "예술,스포츠 및 여가관련 서비스업", "S": "협회·단체,수리 및 기타 개인서비스업",
         "T": "가구내 고용활동 및 자가소비 생산활동", "U": "국제 및 외국기관",
     }
+    MATURITY_COLS_WANTED = ["3M", "6M", "9M", "1Y", "3Y", "5Y"]
 
-    display_cols = [rating_col, industry_col, issuer_col] + maturity_cols
-    if industry_code_col in filtered.columns:
-        display_cols = [industry_code_col] + display_cols
-    display_cols = [c for c in display_cols if c in filtered.columns]
+    def parse_infomax_bond_file(file_obj):
+        """인포맥스 채권 수익률 엑셀 → (정제된 result df, 사용된 만기 열 목록). 실패 시 (None, 오류메시지)."""
+        try:
+            df = pd.read_excel(file_obj, header=2)
+        except Exception as e:
+            return None, f"파일을 읽는 중 오류가 발생했습니다: {e}"
 
-    result = filtered[display_cols].rename(
-        columns={rating_col: "신용등급그룹", industry_col: "업종구분", industry_code_col: "업종코드"}
+        rating_col = df.columns[4]
+        issuer_col = '발행사'
+        if rating_col not in df.columns or issuer_col not in df.columns:
+            return None, "예상한 열 구조와 다릅니다. 파일 형식을 확인해주세요."
+
+        mask_rating = df[rating_col].astype(str).str.contains("공모/무보증", na=False)
+        filtered = df[mask_rating].copy()
+        filtered = filtered[filtered[issuer_col] != filtered[rating_col]]
+
+        maturity_cols = [c for c in MATURITY_COLS_WANTED if c in filtered.columns]
+        industry_col = "업종분류(소)"
+        industry_code_col = "업종코드"
+
+        display_cols = [rating_col, industry_col, issuer_col] + maturity_cols
+        if industry_code_col in filtered.columns:
+            display_cols = [industry_code_col] + display_cols
+        display_cols = [c for c in display_cols if c in filtered.columns]
+
+        result = filtered[display_cols].rename(
+            columns={rating_col: "신용등급그룹", industry_col: "업종구분", industry_code_col: "업종코드"}
+        )
+        result["신용등급그룹"] = (
+            result["신용등급그룹"].astype(str).str.replace("공모/무보증", "", regex=False).str.strip()
+        )
+        result["업종구분"] = result["업종구분"].fillna("미분류")
+
+        if "업종코드" in result.columns:
+            result["산업대분류"] = result["업종코드"].astype(str).str[0].map(KSIC_LARGE).fillna("미분류")
+            result = result.drop(columns=["업종코드"])
+            cols = ["산업대분류"] + [c for c in result.columns if c != "산업대분류"]
+            result = result[cols]
+
+        return result, maturity_cols
+
+    # ------------------------------------------------------------
+    # 과거 데이터 일괄 업로드 (여러 파일을 한 번에 이력에 저장)
+    # ------------------------------------------------------------
+    with st.expander("과거 데이터 일괄 업로드 (여러 날짜 파일을 한 번에 이력 저장)"):
+        st.caption(
+            "파일명에 8자리 날짜(YYYYMMDD)가 포함되어 있으면 자동으로 그 날짜로 저장됩니다 "
+            "(예: 4788-20260714.xlsx → 2026-07-14). 날짜가 없는 파일은 오늘 날짜로 저장됩니다."
+        )
+        bulk_files = st.file_uploader(
+            "과거 인포맥스 파일 여러 개 선택", type=["xlsx", "xls"],
+            accept_multiple_files=True, key="bulk_infomax"
+        )
+
+        if bulk_files:
+            st.write(f"{len(bulk_files)}개 파일이 선택되었습니다.")
+            if st.button("전체 이력에 일괄 저장", key="bulk_save_btn"):
+                if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+                    st.warning(
+                        "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+                        "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+                    )
+                else:
+                    progress = st.progress(0.0, text="일괄 저장 중...")
+                    success_count, fail_list = 0, []
+                    for i, f in enumerate(bulk_files):
+                        res, info = parse_infomax_bond_file(f)
+                        if res is None:
+                            fail_list.append(f"{f.name}: {info}")
+                        else:
+                            date_str = extract_date_from_filename(f.name)
+                            try:
+                                append_history(res, "채권스프레드_이력", date_str)
+                                success_count += 1
+                            except Exception as e:
+                                fail_list.append(f"{f.name}: 저장 오류 - {e}")
+                        progress.progress((i + 1) / len(bulk_files),
+                                           text=f"처리 중... ({i+1}/{len(bulk_files)})")
+                    progress.empty()
+
+                    st.success(f"{success_count}/{len(bulk_files)}개 파일 저장 완료")
+                    if fail_list:
+                        st.error("다음 파일은 처리하지 못했습니다:\n" + "\n".join(fail_list))
+
+    uploaded_file = st.file_uploader(
+        "인포맥스 엑셀 파일을 업로드하세요 (예: 4788-YYYYMMDD.xlsx)", type=["xlsx", "xls"], key="infomax"
     )
-    result["신용등급그룹"] = (
-        result["신용등급그룹"].astype(str).str.replace("공모/무보증", "", regex=False).str.strip()
-    )
-    result["업종구분"] = result["업종구분"].fillna("미분류")
 
-    if "업종코드" in result.columns:
-        result["산업대분류"] = result["업종코드"].astype(str).str[0].map(KSIC_LARGE).fillna("미분류")
-        result = result.drop(columns=["업종코드"])
-        cols = ["산업대분류"] + [c for c in result.columns if c != "산업대분류"]
-        result = result[cols]
+    if uploaded_file is not None:
+        result, info = parse_infomax_bond_file(uploaded_file)
+        if result is None:
+            st.error(info)
+            st.stop()
+        maturity_cols = info
 
-    # ------------------------------------------------------------
-    # 5. 필터 (산업대분류 → 신용등급 → 발행사)
-    # ------------------------------------------------------------
-    st.subheader("필터")
-    col0, col1, col2 = st.columns(3)
+        st.subheader("필터")
+        col0, col1, col2 = st.columns(3)
 
-    with col0:
-        industry_options = sorted(result["산업대분류"].unique())
-        selected_industries = st.multiselect(
-            "산업 대분류 선택", options=industry_options, default=industry_options
-        )
-
-    with col1:
-        rating_options = sorted(
-            result[result["산업대분류"].isin(selected_industries)]["신용등급그룹"].unique()
-        )
-        selected_ratings = st.multiselect(
-            "신용등급 선택", options=rating_options, default=rating_options
-        )
-
-    issuer_pool = result[
-        result["산업대분류"].isin(selected_industries)
-        & result["신용등급그룹"].isin(selected_ratings)
-    ][issuer_col].sort_values().unique()
-
-    with col2:
-        selected_issuers = st.multiselect(
-            "발행사 선택 (비워두면 전체 표시)", options=issuer_pool
-        )
-
-    view = result[
-        result["산업대분류"].isin(selected_industries)
-        & result["신용등급그룹"].isin(selected_ratings)
-    ]
-    if selected_issuers:
-        view = view[view[issuer_col].isin(selected_issuers)]
-
-    # ------------------------------------------------------------
-    # 5-1. DART 재무제표 연동 (선택적 — API 호출이라 다소 시간이 걸립니다)
-    # ------------------------------------------------------------
-    use_dart = st.checkbox(
-        "DART 재무제표 함께 조회 (매출액·영업이익·당기순이익 — 최초 조회 시 다소 시간 소요, 이후 캐시됨)",
-        value=False
-    )
-
-    financial_cols = ["매출액", "영업이익", "당기순이익", "재무제표기준일"]
-
-    if use_dart:
-        if not DART_API_KEY:
-            st.warning(
-                "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud의 App settings → Secrets에 "
-                "DART_API_KEY = \"발급받은키\" 형식으로 등록해주세요."
+        with col0:
+            industry_options = sorted(result["산업대분류"].unique())
+            selected_industries = st.multiselect(
+                "산업 대분류 선택", options=industry_options, default=industry_options
             )
-        else:
-            with st.spinner("DART에서 재무제표를 조회하는 중입니다..."):
-                corp_map = load_corp_code_map(DART_API_KEY)
 
-                unique_issuers = view[issuer_col].unique().tolist()
-                progress = st.progress(0.0, text="재무제표 조회 중...")
-                fin_rows = []
-                for i, name in enumerate(unique_issuers):
-                    corp_code = find_corp_code(name, corp_map)
-                    fin = fetch_financials(corp_code, DART_API_KEY)
-                    fin[issuer_col] = name
-                    fin_rows.append(fin)
-                    progress.progress((i + 1) / max(len(unique_issuers), 1),
-                                       text=f"재무제표 조회 중... ({i+1}/{len(unique_issuers)})")
-                progress.empty()
+        with col1:
+            rating_options = sorted(
+                result[result["산업대분류"].isin(selected_industries)]["신용등급그룹"].unique()
+            )
+            selected_ratings = st.multiselect(
+                "신용등급 선택", options=rating_options, default=rating_options
+            )
 
-            fin_df = pd.DataFrame(fin_rows)
-            view = view.merge(fin_df, on=issuer_col, how="left")
+        issuer_pool = result[
+            result["산업대분류"].isin(selected_industries)
+            & result["신용등급그룹"].isin(selected_ratings)
+        ][issuer_col].sort_values().unique()
 
-            # 열 순서 재배치: 만기 수익률 다음에 매출액/영업이익/당기순이익, 재무제표기준일은 맨 마지막
-            other_cols = [c for c in view.columns if c not in financial_cols]
-            ordered_cols = other_cols + ["매출액", "영업이익", "당기순이익", "재무제표기준일"]
-            view = view[ordered_cols]
+        with col2:
+            selected_issuers = st.multiselect(
+                "발행사 선택 (비워두면 전체 표시)", options=issuer_pool
+            )
 
-    # ------------------------------------------------------------
-    # 6. 결과 표시
-    # ------------------------------------------------------------
-    st.subheader(f"공모/무보증 발행사 목록 ({len(view)}개)")
-    st.dataframe(view, use_container_width=True, hide_index=True)
+        view = result[
+            result["산업대분류"].isin(selected_industries)
+            & result["신용등급그룹"].isin(selected_ratings)
+        ]
+        if selected_issuers:
+            view = view[view[issuer_col].isin(selected_issuers)]
 
-    st.subheader("신용등급별 발행사 수")
-    st.bar_chart(view["신용등급그룹"].value_counts())
-
-    # ------------------------------------------------------------
-    # 등급별 만기별 평균 수익률
-    # ------------------------------------------------------------
-    if maturity_cols:
-        st.subheader("등급별 만기별 평균 수익률")
-        rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
-                         "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-"]
-        avg_by_rating = result.groupby("신용등급그룹")[maturity_cols].mean().round(3)
-        ordered = [r for r in rating_order if r in avg_by_rating.index]
-        remaining = [r for r in avg_by_rating.index if r not in rating_order]
-        avg_by_rating = avg_by_rating.loc[ordered + remaining]
-
-        st.dataframe(avg_by_rating, use_container_width=True)
-        st.caption("등급별 만기 수익률 곡선 (평균)")
-        st.line_chart(avg_by_rating.T)
-
-    # 만기별 수익률 비교 (선택한 발행사 기준)
-    if maturity_cols:
-        st.subheader("발행사별 만기 수익률 비교")
-        pick = st.multiselect(
-            "비교할 발행사 선택 (최대 10개 추천)",
-            options=view[issuer_col].tolist(),
-            default=view[issuer_col].tolist()[:5]
+        use_dart = st.checkbox(
+            "DART 재무제표 함께 조회 (매출액·영업이익·당기순이익 — 최초 조회 시 다소 시간 소요, 이후 캐시됨)",
+            value=False
         )
-        if pick:
-            chart_data = view[view[issuer_col].isin(pick)].set_index(issuer_col)[maturity_cols]
-            st.line_chart(chart_data.T)
 
-    # CSV 다운로드
-    st.download_button(
-        "필터링된 결과 CSV로 다운로드",
-        data=view.to_csv(index=False).encode("utf-8-sig"),
-        file_name="공모무보증_발행사_필터결과.csv",
-        mime="text/csv"
+        financial_cols = ["매출액", "영업이익", "당기순이익", "재무제표기준일"]
+
+        if use_dart:
+            if not DART_API_KEY:
+                st.warning(
+                    "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud의 App settings → Secrets에 "
+                    "DART_API_KEY = \"발급받은키\" 형식으로 등록해주세요."
+                )
+            else:
+                with st.spinner("DART에서 재무제표를 조회하는 중입니다..."):
+                    corp_map = load_corp_code_map(DART_API_KEY)
+                    unique_issuers = view[issuer_col].unique().tolist()
+                    progress = st.progress(0.0, text="재무제표 조회 중...")
+                    fin_rows = []
+                    for i, name in enumerate(unique_issuers):
+                        corp_code = find_corp_code(name, corp_map)
+                        fin = fetch_financials(corp_code, DART_API_KEY)
+                        fin[issuer_col] = name
+                        fin_rows.append(fin)
+                        progress.progress((i + 1) / max(len(unique_issuers), 1),
+                                           text=f"재무제표 조회 중... ({i+1}/{len(unique_issuers)})")
+                    progress.empty()
+
+                fin_df = pd.DataFrame(fin_rows)
+                view = view.merge(fin_df, on=issuer_col, how="left")
+                other_cols = [c for c in view.columns if c not in financial_cols]
+                view = view[other_cols + ["매출액", "영업이익", "당기순이익", "재무제표기준일"]]
+
+        st.subheader(f"공모/무보증 발행사 목록 ({len(view)}개)")
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+        st.subheader("신용등급별 발행사 수")
+        st.bar_chart(view["신용등급그룹"].value_counts())
+
+        if maturity_cols:
+            st.subheader("등급별 만기별 평균 수익률")
+            rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
+                             "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-"]
+            avg_by_rating = result.groupby("신용등급그룹")[maturity_cols].mean().round(3)
+            ordered = [r for r in rating_order if r in avg_by_rating.index]
+            remaining = [r for r in avg_by_rating.index if r not in rating_order]
+            avg_by_rating = avg_by_rating.loc[ordered + remaining]
+            st.dataframe(avg_by_rating, use_container_width=True)
+            st.caption("등급별 만기 수익률 곡선 (평균)")
+            st.line_chart(avg_by_rating.T)
+
+        if maturity_cols:
+            st.subheader("발행사별 만기 수익률 비교")
+            pick = st.multiselect(
+                "비교할 발행사 선택 (최대 10개 추천)",
+                options=view[issuer_col].tolist(), default=view[issuer_col].tolist()[:5]
+            )
+            if pick:
+                chart_data = view[view[issuer_col].isin(pick)].set_index(issuer_col)[maturity_cols]
+                st.line_chart(chart_data.T)
+
+        st.download_button(
+            "필터링된 결과 CSV로 다운로드",
+            data=view.to_csv(index=False).encode("utf-8-sig"),
+            file_name="공모무보증_발행사_필터결과.csv", mime="text/csv"
+        )
+
+        # ------------------------------------------------------------
+        # 이력 저장 (Google Sheets 누적) — 선택사항
+        # ------------------------------------------------------------
+        st.subheader("이력 저장 (선택사항)")
+        st.caption(
+            "현재 화면에 표시된 데이터(위 필터가 적용된 상태)를 날짜와 함께 Google Sheets에 누적 저장합니다. "
+            "같은 날짜로 다시 저장하면 그 날짜 데이터만 덮어씁니다."
+        )
+        default_date = extract_date_from_filename(uploaded_file.name)
+        date_str = st.text_input("기준일자 (YYYYMMDD)", value=default_date, key="history_date")
+
+        if st.button("이력에 저장", key="save_history_btn"):
+            if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+                st.warning(
+                    "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+                    "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+                )
+            elif not re.fullmatch(r"20\d{6}", date_str or ""):
+                st.error("기준일자는 YYYYMMDD 8자리 숫자로 입력해주세요 (예: 20260814).")
+            else:
+                try:
+                    with st.spinner("Google Sheets에 저장하는 중입니다..."):
+                        append_history(view, "채권스프레드_이력", date_str)
+                    st.success(f"{date_str} 기준 {len(view)}건을 이력에 저장했습니다.")
+                except Exception as e:
+                    st.error(f"저장 중 오류가 발생했습니다: {e}")
+    else:
+        st.info("왼쪽 상단에서 인포맥스 엑셀 파일을 업로드하면 대시보드가 표시됩니다.")
+
+
+# ==============================================================
+# TAB 2: 신용등급 변동 트리거 (3대 신평사 통합)
+# ==============================================================
+with tab2:
+    st.caption(
+        "한국신용평가(IS)·나이스신용평가(NICE)·한국기업평가(KR) 3개사의 등급변동 트리거 파일을 "
+        "업로드하면, 표현 방식이 달라도 하나의 표로 통합해서 보여줍니다."
     )
 
-else:
-    st.info("왼쪽 상단에서 인포맥스 엑셀 파일을 업로드하면 대시보드가 표시됩니다.")
+    DIRECTION_MAP = {"이상": ">=", "이하": "<=", "초과": ">", "미만": "<", "상회": ">", "하회": "<"}
+    SYMBOLIC_RE = re.compile(r'^(?P<op>>=|<=|>|<)\s*(?P<val>-?\.?\d[\d,\.]*)\s*(?P<unit>%|배)?$')
+    PHRASE_RE = re.compile(r'^(?P<val>-?[\d,\.]+)\s*(?P<unit>%|배|억원|조원|만원)?\s*(?P<word>이상|이하|초과|미만|상회|하회)$')
+
+    def parse_threshold(raw):
+        if pd.isna(raw):
+            return None
+        text = str(raw).strip()
+        if text == "" or text.lower() == "n.a.":
+            return None
+        m = SYMBOLIC_RE.match(text)
+        if m:
+            val = float(m.group("val").replace(",", ""))
+            return {"연산자": m.group("op"), "값": val, "단위": m.group("unit"), "원문": text, "특이조건": None}
+        m = PHRASE_RE.match(text)
+        if m:
+            val = float(m.group("val").replace(",", ""))
+            op = DIRECTION_MAP[m.group("word")]
+            return {"연산자": op, "값": val, "단위": m.group("unit"), "원문": text, "특이조건": None}
+        return {"연산자": None, "값": None, "단위": None, "원문": text, "특이조건": text}
+
+    def infer_unit(indicator_name, parsed_unit):
+        if parsed_unit:
+            return parsed_unit
+        name = str(indicator_name)
+        if "배" in name:
+            return "배"
+        if any(k in name for k in ["비율", "율", "Margin", "M/S", "ROA", "ROE"]):
+            return "%"
+        if "억원" in name:
+            return "억원"
+        return None
+
+    with st.expander("발행사명 별칭 추가 (표기 차이가 있는 회사를 직접 등록하고 싶을 때)"):
+        st.caption(
+            "예: 파일마다 '디비증권' / 'DB증권' / 'DB증권주식회사'처럼 표기가 다른 경우, "
+            "한 줄에 하나씩 '별칭 = 표준명' 형식으로 입력하세요."
+        )
+        alias_text = st.text_area(
+            "별칭 매핑 (선택사항)", height=100,
+            placeholder="디비증권 = DB증권\n한투증권 = 한국투자증권",
+            key="alias_input"
+        )
+
+    user_aliases = {}
+    if alias_text:
+        for line in alias_text.splitlines():
+            if "=" in line:
+                alias, canon = line.split("=", 1)
+                alias, canon = alias.strip(), canon.strip()
+                if alias and canon:
+                    user_aliases[alias] = canon
+
+    def resolve_issuer_name(raw_name):
+        """기본 정규화(공식 접미어 제거 + 코드 내장 별칭) 후, 사용자가 입력한 별칭까지 추가 반영."""
+        base = normalize_issuer_name(raw_name)
+        if base is None:
+            return None
+        return user_aliases.get(base, base)
+
+    st.markdown("**5개 파일 업로드**")
+    c1, c2 = st.columns(2)
+    with c1:
+        f_is_corp = st.file_uploader("한국신용평가(IS) — 기업부문", type=["xlsx"], key="is_corp")
+        f_is_fin = st.file_uploader("한국신용평가(IS) — 금융부문", type=["xlsx"], key="is_fin")
+        f_kr = st.file_uploader("한국기업평가(KR)", type=["xls", "xlsx"], key="kr")
+    with c2:
+        f_nice_corp = st.file_uploader("나이스신용평가(NICE) — 기업", type=["xlsx"], key="nice_corp")
+        f_nice_fin = st.file_uploader("나이스신용평가(NICE) — 금융", type=["xlsx"], key="nice_fin")
+
+    rows = []
+
+    # --- 한신평 기업부문 ---
+    if f_is_corp is not None:
+        try:
+            df = pd.read_excel(f_is_corp, sheet_name='업체별 KMI 지표 및 실적', header=13)
+            for _, r in df.iterrows():
+                issuer, indicator = r.get('업체명'), r.get('KMI 지표')
+                if pd.isna(issuer) or pd.isna(indicator):
+                    continue
+                for direction, col in [('상향', '상향가능성'), ('하향', '하향가능성')]:
+                    parsed = parse_threshold(r.get(col))
+                    if parsed is None:
+                        continue
+                    rows.append({"신평사": "한국신용평가", "원본발행사명": issuer,
+                                  "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
+                                  "지표명": indicator, "방향": direction, **parsed,
+                                  "단위": infer_unit(indicator, parsed["단위"])})
+        except Exception as e:
+            st.error(f"한신평 기업부문 파일 처리 오류: {e}")
+
+    # --- 한신평 금융부문 ---
+    if f_is_fin is not None:
+        try:
+            df = pd.read_excel(f_is_fin, sheet_name='업체별 KMI 지표 및 실적', header=13)
+            for _, r in df.iterrows():
+                issuer, indicator = r.get('업체명'), r.get('KMI')
+                if pd.isna(issuer) or pd.isna(indicator) or r.get('정성/정량') != '정량':
+                    continue
+                for direction, col in [('상향', '상향가능성'), ('하향', '하향가능성')]:
+                    parsed = parse_threshold(r.get(col))
+                    if parsed is None:
+                        continue
+                    rows.append({"신평사": "한국신용평가", "원본발행사명": issuer,
+                                  "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
+                                  "지표명": indicator, "방향": direction, **parsed,
+                                  "단위": infer_unit(indicator, parsed["단위"])})
+        except Exception as e:
+            st.error(f"한신평 금융부문 파일 처리 오류: {e}")
+
+    # --- NICE 기업/금융 (동일 구조) ---
+    for f, label in [(f_nice_corp, "NICE(기업)"), (f_nice_fin, "NICE(금융)")]:
+        if f is not None:
+            try:
+                df = pd.read_excel(f, header=12)
+                df.columns = [str(c).strip() for c in df.columns]
+                issuer_col = df.columns[1]
+                rating_col = [c for c in df.columns if c == "'26.06"][0]
+                indicator_col = [c for c in df.columns if '트리거지표' in c][0]
+                up_col = [c for c in df.columns if '상향' in c][0]
+                down_col = [c for c in df.columns if '하향' in c][0]
+                for _, r in df.iterrows():
+                    issuer, indicator = r.get(issuer_col), r.get(indicator_col)
+                    if pd.isna(issuer) or pd.isna(indicator):
+                        continue
+                    for direction, col in [('상향', up_col), ('하향', down_col)]:
+                        parsed = parse_threshold(r.get(col))
+                        if parsed is None:
+                            continue
+                        rows.append({"신평사": "나이스신용평가", "원본발행사명": issuer,
+                                      "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get(rating_col),
+                                      "지표명": indicator, "방향": direction, **parsed,
+                                      "단위": infer_unit(indicator, parsed["단위"])})
+            except Exception as e:
+                st.error(f"{label} 파일 처리 오류: {e}")
+
+    # --- 한기평(KR) ---
+    if f_kr is not None:
+        try:
+            df = pd.read_excel(f_kr, sheet_name='Sheet1', header=25)
+            for _, r in df.iterrows():
+                issuer, indicator = r.get('업체명'), r.get('등급변동요인')
+                if pd.isna(issuer) or pd.isna(indicator):
+                    continue
+                for direction, col in [('상향', '상향'), ('하향', '하향')]:
+                    parsed = parse_threshold(r.get(col))
+                    if parsed is None:
+                        continue
+                    rows.append({"신평사": "한국기업평가", "원본발행사명": issuer,
+                                  "발행사(정규화)": resolve_issuer_name(issuer), "등급": r.get('등급'),
+                                  "지표명": indicator, "방향": direction, **parsed,
+                                  "단위": infer_unit(indicator, parsed["단위"])})
+        except Exception as e:
+            st.error(f"한기평(KR) 파일 처리 오류: {e}")
+
+    if rows:
+        unified = pd.DataFrame(rows)
+        st.success(f"총 {len(unified)}개 트리거 항목을 통합했습니다 (신평사 {unified['신평사'].nunique()}개사).")
+
+        st.subheader("발행사 검색")
+        search = st.text_input("발행사명 입력 (부분 검색 가능)", key="trigger_search")
+
+        if search:
+            hit = unified[unified["발행사(정규화)"].str.contains(search, na=False)]
+        else:
+            hit = unified
+
+        st.dataframe(
+            hit[["발행사(정규화)", "원본발행사명", "신평사", "등급", "지표명", "방향", "원문", "연산자", "값", "단위", "특이조건"]],
+            use_container_width=True, hide_index=True
+        )
+
+        if search:
+            matched_names = sorted(hit["발행사(정규화)"].dropna().unique())
+            rater_count = hit.groupby("발행사(정규화)")["신평사"].nunique()
+            st.caption(
+                f"검색된 발행사: {', '.join(matched_names[:10])}"
+                + (" ..." if len(matched_names) > 10 else "")
+            )
+            for name in matched_names:
+                n_raters = rater_count.get(name, 0)
+                if n_raters < 3:
+                    st.caption(f"⚠️ '{name}': {n_raters}개 신평사에서만 발견됨 — 회사명 표기 차이로 일부가 안 잡혔을 수 있습니다.")
+
+        st.download_button(
+            "통합 트리거 결과 CSV 다운로드",
+            data=unified.to_csv(index=False).encode("utf-8-sig"),
+            file_name="신용등급_변동트리거_통합.csv", mime="text/csv"
+        )
+    else:
+        st.info("왼쪽에서 신평사 파일을 하나 이상 업로드하면 통합 결과가 표시됩니다.")
