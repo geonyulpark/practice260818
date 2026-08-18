@@ -47,45 +47,83 @@ if uploaded_file is not None:
     #    - 만기: 3M/6M/9M/1Y/3Y/5Y만 표시
     #    - "평가사" 열 제외
     #    - 발행사 앞에 업종분류(소) 열 추가
+    #    - 업종코드 첫 글자로 산업 대분류 매핑
     #    - 신용등급그룹은 "공모/무보증 " 접두어를 떼고 등급만 표시 (예: "A-")
     # ------------------------------------------------------------
     maturity_cols = ["3M", "6M", "9M", "1Y", "3Y", "5Y"]
     maturity_cols = [c for c in maturity_cols if c in filtered.columns]
 
     industry_col = "업종분류(소)"
+    industry_code_col = "업종코드"
+
+    # 한국표준산업분류(11차) 대분류 매핑 (코드 첫 글자 기준)
+    KSIC_LARGE = {
+        "A": "농업, 임업 및 어업", "B": "광업", "C": "제조업",
+        "D": "전기,가스,증기 및 공기조절 공급업", "E": "수도,하수 및 폐기물 처리업",
+        "F": "건설업", "G": "도매 및 소매업", "H": "운수 및 창고업",
+        "I": "숙박 및 음식점업", "J": "정보통신업", "K": "금융 및 보험업",
+        "L": "부동산업", "M": "전문,과학 및 기술 서비스업",
+        "N": "사업시설관리 및 사업지원 서비스업", "O": "공공행정,국방 및 사회보장행정",
+        "P": "교육 서비스업", "Q": "보건업 및 사회복지 서비스업",
+        "R": "예술,스포츠 및 여가관련 서비스업", "S": "협회·단체,수리 및 기타 개인서비스업",
+        "T": "가구내 고용활동 및 자가소비 생산활동", "U": "국제 및 외국기관",
+    }
 
     display_cols = [rating_col, industry_col, issuer_col] + maturity_cols
+    if industry_code_col in filtered.columns:
+        display_cols = [industry_code_col] + display_cols
     display_cols = [c for c in display_cols if c in filtered.columns]
 
     result = filtered[display_cols].rename(
-        columns={rating_col: "신용등급그룹", industry_col: "업종구분"}
+        columns={rating_col: "신용등급그룹", industry_col: "업종구분", industry_code_col: "업종코드"}
     )
     result["신용등급그룹"] = (
         result["신용등급그룹"].astype(str).str.replace("공모/무보증", "", regex=False).str.strip()
     )
     result["업종구분"] = result["업종구분"].fillna("미분류")
 
+    if "업종코드" in result.columns:
+        result["산업대분류"] = result["업종코드"].astype(str).str[0].map(KSIC_LARGE).fillna("미분류")
+        result = result.drop(columns=["업종코드"])
+        # 열 순서: 산업대분류를 맨 앞으로
+        cols = ["산업대분류"] + [c for c in result.columns if c != "산업대분류"]
+        result = result[cols]
+
     # ------------------------------------------------------------
-    # 5. 필터 (표 바로 위에 배치 — 등급 선택 + 발행사 선택)
+    # 5. 필터 (표 바로 위에 배치 — 산업대분류 + 등급 선택 + 발행사 선택)
     # ------------------------------------------------------------
     st.subheader("필터")
-    col1, col2 = st.columns(2)
+    col0, col1, col2 = st.columns(3)
+
+    with col0:
+        industry_options = sorted(result["산업대분류"].unique())
+        selected_industries = st.multiselect(
+            "산업 대분류 선택", options=industry_options, default=industry_options
+        )
 
     with col1:
-        rating_options = sorted(result["신용등급그룹"].unique())
+        rating_options = sorted(
+            result[result["산업대분류"].isin(selected_industries)]["신용등급그룹"].unique()
+        )
         selected_ratings = st.multiselect(
             "신용등급 선택", options=rating_options, default=rating_options
         )
 
-    # 선택된 등급에 해당하는 발행사만 옵션으로 제공
-    issuer_pool = result[result["신용등급그룹"].isin(selected_ratings)][issuer_col].sort_values().unique()
+    # 선택된 산업/등급에 해당하는 발행사만 옵션으로 제공
+    issuer_pool = result[
+        result["산업대분류"].isin(selected_industries)
+        & result["신용등급그룹"].isin(selected_ratings)
+    ][issuer_col].sort_values().unique()
 
     with col2:
         selected_issuers = st.multiselect(
             "발행사 선택 (비워두면 전체 표시)", options=issuer_pool
         )
 
-    view = result[result["신용등급그룹"].isin(selected_ratings)]
+    view = result[
+        result["산업대분류"].isin(selected_industries)
+        & result["신용등급그룹"].isin(selected_ratings)
+    ]
     if selected_issuers:
         view = view[view[issuer_col].isin(selected_issuers)]
 
