@@ -11,7 +11,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Compass", layout="wide")
-st.subheader("🧭 Compass")
+st.title("🧭 Compass")
 
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
@@ -25,9 +25,6 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
 with st.sidebar:
-    st.markdown("### 🧭 Compass")
-    st.markdown("---")
-
     for _p in NAV_VIEW_PAGES:
         if st.button(_p, key=f"nav_btn_{_p}", use_container_width=True,
                      type="primary" if st.session_state.nav_page == _p else "secondary"):
