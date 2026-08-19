@@ -422,7 +422,62 @@ def save_alias_excel_upload(df: pd.DataFrame):
     load_issuer_aliases_full.clear()
 
 
-def normalize_issuer_name(name):
+def validate_alias_table(df: pd.DataFrame) -> dict:
+    """별칭 표에서 흔한 문제 3가지를 점검: 표준명 중복행 / 별칭 충돌 / 표준명에 남은 법인접미어."""
+    result = {"dup_rows": pd.DataFrame(), "conflicts": [], "suffix_rows": pd.DataFrame()}
+    if df.empty or "표준명" not in df.columns:
+        return result
+
+    source_cols = [c for c in df.columns if c != "표준명"]
+
+    # 1) 표준명 완전 중복행
+    dup_mask = df["표준명"].astype(str).str.strip().duplicated(keep=False) & (df["표준명"].astype(str).str.strip() != "")
+    result["dup_rows"] = df[dup_mask].sort_values("표준명")
+
+    # 2) 같은 표기가 서로 다른 표준명에 매핑된 충돌
+    alias_to_canons = {}
+    for _, row in df.iterrows():
+        canon = str(row.get("표준명", "")).strip()
+        if not canon:
+            continue
+        for col in source_cols:
+            val = row.get(col)
+            if pd.isna(val):
+                continue
+            val = str(val).strip()
+            if not val:
+                continue
+            alias_to_canons.setdefault(val, set()).add(canon)
+    result["conflicts"] = [(a, sorted(c)) for a, c in alias_to_canons.items() if len(c) > 1]
+
+    # 3) 표준명 자체에 법인접미어(주식회사/(주)/㈜)가 남아있는 행
+    suffix_mask = df["표준명"].astype(str).str.contains("주식회사|\\(주\\)|㈜", na=False, regex=True)
+    result["suffix_rows"] = df[suffix_mask]
+
+    return result
+
+
+def build_cleaned_alias_table(df: pd.DataFrame) -> pd.DataFrame:
+    """표준명 법인접미어 제거 + 중복행 병합(각 열의 첫 non-null 값을 채택)한 정리안을 만든다."""
+    if df.empty or "표준명" not in df.columns:
+        return df
+
+    cleaned = df.copy()
+    for suf in ["주식회사", "(주)", "㈜"]:
+        cleaned["표준명"] = cleaned["표준명"].astype(str).str.replace(suf, "", regex=False)
+    cleaned["표준명"] = cleaned["표준명"].str.strip()
+    cleaned = cleaned[cleaned["표준명"] != ""]
+
+    def first_non_blank(series):
+        vals = [str(v).strip() for v in series if pd.notna(v) and str(v).strip() != ""]
+        return vals[0] if vals else ""
+
+    other_cols = [c for c in cleaned.columns if c != "표준명"]
+    merged = cleaned.groupby("표준명", as_index=False).agg({c: first_non_blank for c in other_cols})
+    return merged[ALIAS_HEADER] if all(c in merged.columns for c in ALIAS_HEADER) else merged
+
+
+
     """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + Google Sheets 별칭)."""
     if pd.isna(name):
         return None
@@ -1307,6 +1362,59 @@ with tab4:
                     "⚠️ 엑셀 업로드는 시트 **전체를 덮어씁니다**. 다운로드한 최신 파일을 기준으로 수정해서 "
                     "올려주세요 (다른 사람이 그 사이에 추가한 내용이 있다면 먼저 새로 다운로드하고 반영해서 병합하세요)."
                 )
+
+                # ------------------------------------------------------------
+                # 별칭 표 검증
+                # ------------------------------------------------------------
+                st.markdown("---")
+                st.subheader("별칭 표 검증")
+                st.caption(
+                    "표준명이 중복된 행, 같은 표기가 서로 다른 표준명에 잘못 매핑된 충돌, "
+                    "표준명에 법인접미어(주식회사/(주)/㈜)가 그대로 남아있는 경우를 찾아줍니다."
+                )
+                if st.button("검증 실행", key="validate_alias_btn"):
+                    check_df = load_issuer_aliases_full()
+                    validation = validate_alias_table(check_df)
+
+                    n_dup = check_df.loc[
+                        check_df["표준명"].astype(str).str.strip().duplicated(keep=False)
+                        & (check_df["표준명"].astype(str).str.strip() != "")
+                    ]["표준명"].nunique() if not check_df.empty else 0
+
+                    if validation["dup_rows"].empty and not validation["conflicts"] and validation["suffix_rows"].empty:
+                        st.success("문제가 발견되지 않았습니다. 👍")
+                    else:
+                        if not validation["dup_rows"].empty:
+                            st.warning(f"표준명이 중복된 회사 {n_dup}개 ({len(validation['dup_rows'])}행)")
+                            st.dataframe(validation["dup_rows"], use_container_width=True, hide_index=True)
+
+                        if validation["conflicts"]:
+                            st.warning(f"같은 표기가 서로 다른 표준명에 매핑된 충돌 {len(validation['conflicts'])}건")
+                            conflict_df = pd.DataFrame(
+                                [{"표기": a, "충돌하는 표준명들": " / ".join(c)} for a, c in validation["conflicts"]]
+                            )
+                            st.dataframe(conflict_df, use_container_width=True, hide_index=True)
+
+                        if not validation["suffix_rows"].empty:
+                            st.warning(f"표준명에 법인접미어가 남아있는 행 {len(validation['suffix_rows'])}건")
+                            st.dataframe(validation["suffix_rows"], use_container_width=True, hide_index=True)
+
+                        st.markdown("**자동 정리안 미리보기**")
+                        st.caption(
+                            "표준명에서 법인접미어를 제거하고, 중복행은 각 열의 값을 하나로 합칩니다 "
+                            "(충돌 나는 값은 먼저 나온 값을 채택합니다). 아래 미리보기를 확인 후 적용하세요."
+                        )
+                        cleaned_preview = build_cleaned_alias_table(check_df)
+                        st.caption(f"정리 전 {len(check_df)}행 → 정리 후 {len(cleaned_preview)}행")
+                        st.dataframe(cleaned_preview, use_container_width=True, hide_index=True)
+
+                        if st.button("이 정리안으로 저장", key="apply_cleaned_alias_btn"):
+                            try:
+                                save_alias_excel_upload(cleaned_preview)
+                                st.success("정리된 내용으로 저장했습니다.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"저장 중 오류가 발생했습니다: {e}")
 
                 # ------------------------------------------------------------
                 # 화면에서 직접 추가/삭제 (엑셀 없이 빠르게)
