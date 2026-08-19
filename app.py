@@ -1845,6 +1845,7 @@ elif page == "신용등급 트리거":
 
         with st.spinner("이력을 불러오는 중입니다..."):
             trigger_hist = read_history("신용등급트리거_이력")
+            winus_hist_for_trigger = read_history("위너스_이력")
 
         if trigger_hist.empty or "기준일" not in trigger_hist.columns:
             st.info("저장된 트리거 이력이 없습니다. '데이터 업로드' 메뉴에서 신평사 파일을 저장해주세요.")
@@ -1864,6 +1865,39 @@ elif page == "신용등급 트리거":
                     lambda row: row["기준일"] == latest_by_rater[row["신평사"]], axis=1
                 )
                 as_of_trigger = th_valid[keep_mask].copy()
+
+                # 위너스 최신 스냅샷 (표준명 매칭용으로 미리 준비)
+                if not winus_hist_for_trigger.empty and "업데이트일자" in winus_hist_for_trigger.columns:
+                    _latest_winus_date = winus_hist_for_trigger["업데이트일자"].astype(str).max()
+                    winus_latest_for_trigger = winus_hist_for_trigger[
+                        winus_hist_for_trigger["업데이트일자"].astype(str) == _latest_winus_date
+                    ].copy()
+                    winus_latest_for_trigger["표준명"] = winus_latest_for_trigger["발행사명"].apply(normalize_issuer_name)
+                else:
+                    winus_latest_for_trigger = pd.DataFrame()
+
+                def build_exposure_table(name_counts):
+                    """{표준명: 충족건수} 형태의 Series를 받아 위너스 익스포저를 붙인 표를 잔여한도 내림차순으로 반환."""
+                    rows = []
+                    for name, cnt in name_counts.items():
+                        match = winus_latest_for_trigger[winus_latest_for_trigger.get("표준명") == name] \
+                            if not winus_latest_for_trigger.empty else pd.DataFrame()
+                        if not match.empty:
+                            m = match.iloc[0]
+                            rows.append({
+                                "표준명": name, "충족건수": cnt,
+                                "검토의견": m.get("검토의견") or "-",
+                                "잔여한도": pd.to_numeric(m.get("잔여한도"), errors="coerce"),
+                                "투자한도": pd.to_numeric(m.get("투자한도"), errors="coerce"),
+                                "회사채잔액": pd.to_numeric(m.get("회사채잔액"), errors="coerce"),
+                            })
+                        else:
+                            rows.append({"표준명": name, "충족건수": cnt, "검토의견": "-",
+                                          "잔여한도": None, "투자한도": None, "회사채잔액": None})
+                    df = pd.DataFrame(rows)
+                    if not df.empty:
+                        df = df.sort_values("잔여한도", ascending=False, na_position="last")
+                    return df
 
                 # 표준명(라이브 재계산)과 충족여부를 검색·목록 구성 전에 미리 확보
                 as_of_trigger["표준명"] = as_of_trigger["원본발행사명"].apply(normalize_issuer_name)
@@ -1904,6 +1938,8 @@ elif page == "신용등급 트리거":
                     if st.button(f"전체보기 (총 {len(up_companies_all)}개)", key="trigger_up_show_all_btn"):
                         st.session_state["trigger_show_all_up"] = True
                         st.rerun()
+                with st.expander("📊 익스포저 포함 표로 보기 (잔여한도 많은 순)"):
+                    st.dataframe(build_exposure_table(up_counts), use_container_width=True, hide_index=True)
 
                 st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies_all)}개사, 충족 건수 많은 순)**")
                 down_list = down_companies_all if st.session_state["trigger_show_all_down"] else down_companies_all[:MAX_SHOW]
@@ -1914,6 +1950,8 @@ elif page == "신용등급 트리거":
                     if st.button(f"전체보기 (총 {len(down_companies_all)}개)", key="trigger_down_show_all_btn"):
                         st.session_state["trigger_show_all_down"] = True
                         st.rerun()
+                with st.expander("📊 익스포저 포함 표로 보기 (잔여한도 많은 순)"):
+                    st.dataframe(build_exposure_table(down_counts), use_container_width=True, hide_index=True)
 
                 # 선택된 회사가 지금 목록에 더 이상 없으면(검색어 변경 등) 선택 해제
                 if st.session_state.get("trigger_pick") and st.session_state["trigger_pick"] not in set(hit["표준명"].dropna()):
@@ -1958,6 +1996,48 @@ elif page == "신용등급 트리거":
 
                 st.subheader(f"트리거 목록 ({len(display_df)}건)")
                 st.dataframe(display_df[show_cols], use_container_width=True, hide_index=True, height=400)
+
+                # --- 발행사 하나가 선택된 상태면, 그 발행사의 지표 추이(전체 기준일) 표시 ---
+                if st.session_state.get("trigger_pick"):
+                    _picked = st.session_state["trigger_pick"]
+                    st.subheader(f"{_picked} — 지표 추이")
+                    company_hist = trigger_hist.copy()
+                    company_hist["표준명"] = company_hist["원본발행사명"].apply(normalize_issuer_name)
+                    company_hist = company_hist[company_hist["표준명"] == _picked]
+
+                    if company_hist.empty:
+                        st.caption("이 발행사의 트리거 이력이 없습니다.")
+                    else:
+                        indicator_options = sorted(company_hist["지표명"].dropna().unique())
+                        if not indicator_options:
+                            st.caption("지표 데이터가 없습니다.")
+                        else:
+                            picked_indicator = st.selectbox(
+                                "지표 선택", options=indicator_options, key="trigger_trend_indicator"
+                            )
+                            trend_df = company_hist[company_hist["지표명"] == picked_indicator].copy()
+                            trend_df["실제수치"] = pd.to_numeric(trend_df["실제수치"], errors="coerce")
+                            trend_df["기준일"] = trend_df["기준일"].astype(str)
+                            trend_df["신평사"] = trend_df["신평사"].map(RATER_ABBREV).fillna(trend_df["신평사"])
+                            trend_df = trend_df.sort_values("기준일")
+                            date_order = sorted(trend_df["기준일"].unique())
+
+                            if trend_df["실제수치"].notna().sum() == 0:
+                                st.caption("이 지표는 시계열로 표시할 숫자 데이터가 없습니다 (특이조건 텍스트만 존재).")
+                            else:
+                                trend_chart = alt.Chart(trend_df).mark_line(point=True).encode(
+                                    x=alt.X("기준일:N", sort=date_order, title="기준일"),
+                                    y=alt.Y("실제수치:Q", title=picked_indicator),
+                                    color=alt.Color("신평사:N", title=None),
+                                )
+                                st.altair_chart(trend_chart, use_container_width=True)
+
+                            with st.expander("기준일별 상향/하향 임계치 보기"):
+                                threshold_cols = [c for c in ["신평사", "기준일", "방향", "원문", "특이조건"] if c in trend_df.columns]
+                                st.dataframe(
+                                    trend_df[threshold_cols].drop_duplicates(),
+                                    use_container_width=True, hide_index=True
+                                )
 
                 if search:
                     matched_names = sorted(hit["표준명"].dropna().unique())
