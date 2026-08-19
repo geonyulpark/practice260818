@@ -1211,7 +1211,7 @@ with tab3:
                     st.error(winus_err)
                 else:
                     st.success(f"{len(winus_parsed)}개 발행사 익스포저를 확인했습니다.")
-                    st.dataframe(winus_parsed.head(10), use_container_width=True, hide_index=True)
+                    st.dataframe(winus_parsed, use_container_width=True, hide_index=True, height=400)
                     winus_date = st.text_input(
                         "기준일자 (YYYYMMDD)",
                         value=extract_date_from_filename(winus_file.name),
@@ -1310,73 +1310,99 @@ with tab3:
                     latest_winus_date = wh_valid["업데이트일자"].max()
                     as_of_winus = wh_valid[wh_valid["업데이트일자"] == latest_winus_date]
 
-            # --- 발행사 선택해서 둘을 한 화면에 ---
-            if not day_spread.empty:
+            # --- 발행사 선택 목록: 채권스프레드·트리거·위너스 3개 소스를 합쳐서 구성 ---
+            issuer_col_name = "발행사" if "발행사" in day_spread.columns else None
+
+            options_map = {}  # 정규화명 -> 화면에 보여줄 대표 표시명
+            if issuer_col_name:
+                for raw in day_spread[issuer_col_name].dropna().unique():
+                    norm = normalize_issuer_name(raw)
+                    options_map.setdefault(norm, raw)
+            if not as_of_trigger.empty and "원본발행사명" in as_of_trigger.columns:
+                for raw in as_of_trigger["원본발행사명"].dropna().unique():
+                    norm = normalize_issuer_name(raw)
+                    options_map.setdefault(norm, norm)
+            if not as_of_winus.empty and "발행사명" in as_of_winus.columns:
+                for raw in as_of_winus["발행사명"].dropna().unique():
+                    norm = normalize_issuer_name(raw)
+                    options_map.setdefault(norm, norm)
+
+            if options_map:
                 st.subheader("발행사별 상세 보기")
-                issuer_col_name = "발행사" if "발행사" in day_spread.columns else None
-                if issuer_col_name:
-                    pick_issuer = st.selectbox(
-                        "발행사 선택", options=sorted(day_spread[issuer_col_name].dropna().unique())
-                    )
-                    if pick_issuer:
-                        st.markdown(f"**{pick_issuer} — 채권 스프레드 ({query_date})**")
+                st.caption(
+                    "채권 스프레드·신용등급 트리거·위너스 익스포저 중 하나라도 정보가 있는 발행사는 모두 목록에 나옵니다. "
+                    "일부 소스에 정보가 없으면 해당 항목에서만 '찾지 못했습니다'로 표시됩니다."
+                )
+                pick_issuer = st.selectbox(
+                    "발행사 선택", options=sorted(options_map.values())
+                )
+                if pick_issuer:
+                    norm_pick = normalize_issuer_name(pick_issuer)
+
+                    st.markdown(f"**{pick_issuer} — 채권 스프레드 ({query_date})**")
+                    if issuer_col_name and not day_spread.empty:
+                        live_normalized_spread = day_spread[issuer_col_name].apply(normalize_issuer_name)
+                        issuer_spread = day_spread[live_normalized_spread == norm_pick]
+                    else:
+                        issuer_spread = pd.DataFrame()
+                    if issuer_spread.empty:
+                        st.caption("이 발행사에 대한 채권 스프레드 정보를 찾지 못했습니다 (그날 공모/무보증 채권이 없었을 수 있습니다).")
+                    else:
                         st.dataframe(
-                            day_spread[day_spread[issuer_col_name] == pick_issuer].drop(columns=["업데이트일자"]),
+                            issuer_spread.drop(columns=["업데이트일자"]),
                             use_container_width=True, hide_index=True
                         )
 
-                        if not as_of_trigger.empty and "원본발행사명" in as_of_trigger.columns:
-                            norm_pick = normalize_issuer_name(pick_issuer)
-                            # 저장 당시 얼어붙은 '발행사(정규화)' 값 대신, 원본발행사명을 지금 시점의
-                            # 최신 별칭(관리자 설정에서 추가된 것 포함)으로 다시 계산해서 매칭한다.
-                            live_normalized = as_of_trigger["원본발행사명"].apply(normalize_issuer_name)
-                            issuer_trigger = as_of_trigger[live_normalized == norm_pick]
-                            st.markdown(f"**{pick_issuer} — 신용등급 변동 트리거 (해당 시점 기준)**")
-                            if issuer_trigger.empty:
-                                st.caption("이 발행사에 대한 트리거 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
-                            else:
-                                it = issuer_trigger.copy()
-                                if "신평사" in it.columns:
-                                    it["신평사"] = it["신평사"].map(RATER_ABBREV).fillna(it["신평사"])
+                    if not as_of_trigger.empty and "원본발행사명" in as_of_trigger.columns:
+                        # 저장 당시 얼어붙은 '발행사(정규화)' 값 대신, 원본발행사명을 지금 시점의
+                        # 최신 별칭(관리자 설정에서 추가된 것 포함)으로 다시 계산해서 매칭한다.
+                        live_normalized = as_of_trigger["원본발행사명"].apply(normalize_issuer_name)
+                        issuer_trigger = as_of_trigger[live_normalized == norm_pick]
+                        st.markdown(f"**{pick_issuer} — 신용등급 변동 트리거 (해당 시점 기준)**")
+                        if issuer_trigger.empty:
+                            st.caption("이 발행사에 대한 트리거 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
+                        else:
+                            it = issuer_trigger.copy()
+                            if "신평사" in it.columns:
+                                it["신평사"] = it["신평사"].map(RATER_ABBREV).fillna(it["신평사"])
 
-                                actual_header = "실제수치"
-                                if "기준월" in it.columns:
-                                    labels = it["기준월"].dropna().unique()
-                                    if len(labels) > 0:
-                                        actual_header = f"실제 수치({labels[0]})"
+                            actual_header = "실제수치"
+                            if "기준월" in it.columns:
+                                labels = it["기준월"].dropna().unique()
+                                if len(labels) > 0:
+                                    actual_header = f"실제 수치({labels[0]})"
 
-                                if "충족여부" not in it.columns and {"실제수치", "연산자", "값", "방향"} <= set(it.columns):
-                                    it["충족여부"] = it.apply(trigger_signal, axis=1)
+                            if "충족여부" not in it.columns and {"실제수치", "연산자", "값", "방향"} <= set(it.columns):
+                                it["충족여부"] = it.apply(trigger_signal, axis=1)
 
-                                if "실제수치" in it.columns:
-                                    it = it.rename(columns={"실제수치": actual_header})
+                            if "실제수치" in it.columns:
+                                it = it.rename(columns={"실제수치": actual_header})
 
-                                display_cols = [c for c in
-                                    ["원본발행사명", "신평사", "기준일", "등급", "등급전망",
-                                     "지표명", actual_header, "충족여부",
-                                     "방향", "원문", "특이조건"]
-                                    if c in it.columns]
-                                st.dataframe(
-                                    it[display_cols],
-                                    use_container_width=True, hide_index=True
-                                )
+                            display_cols = [c for c in
+                                ["원본발행사명", "신평사", "기준일", "등급", "등급전망",
+                                 "지표명", actual_header, "충족여부",
+                                 "방향", "원문", "특이조건"]
+                                if c in it.columns]
+                            st.dataframe(
+                                it[display_cols],
+                                use_container_width=True, hide_index=True
+                            )
 
-                        if not as_of_winus.empty and "발행사명" in as_of_winus.columns:
-                            norm_pick2 = normalize_issuer_name(pick_issuer)
-                            live_normalized_winus = as_of_winus["발행사명"].apply(normalize_issuer_name)
-                            issuer_winus = as_of_winus[live_normalized_winus == norm_pick2]
-                            st.markdown(f"**{pick_issuer} — 익스포저 현황 (해당 시점 기준)**")
-                            if issuer_winus.empty:
-                                st.caption("이 발행사에 대한 위너스 익스포저 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
-                            else:
-                                winus_cols = [c for c in
-                                    ["검토의견", "내부등급", "투자한도", "잔여한도",
-                                     "회사채잔액", "CP잔액", "CD잔액", "RP잔액", "정기예금잔액"]
-                                    if c in issuer_winus.columns]
-                                st.dataframe(
-                                    issuer_winus[winus_cols],
-                                    use_container_width=True, hide_index=True
-                                )
+                    if not as_of_winus.empty and "발행사명" in as_of_winus.columns:
+                        live_normalized_winus = as_of_winus["발행사명"].apply(normalize_issuer_name)
+                        issuer_winus = as_of_winus[live_normalized_winus == norm_pick]
+                        st.markdown(f"**{pick_issuer} — 익스포저 현황 (해당 시점 기준)**")
+                        if issuer_winus.empty:
+                            st.caption("이 발행사에 대한 위너스 익스포저 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
+                        else:
+                            winus_cols = [c for c in
+                                ["검토의견", "내부등급", "투자한도", "잔여한도",
+                                 "회사채잔액", "CP잔액", "CD잔액", "RP잔액", "정기예금잔액"]
+                                if c in issuer_winus.columns]
+                            st.dataframe(
+                                issuer_winus[winus_cols],
+                                use_container_width=True, hide_index=True
+                            )
 
 
 # ==============================================================
@@ -1623,37 +1649,57 @@ with tab4:
                 st.markdown("---")
                 st.subheader("미매칭 발행사 자동 탐지")
                 st.caption(
-                    "저장된 채권 스프레드 이력(인포맥스 발행사 목록)과 신용등급 트리거 이력(신평사별 발행사 목록)을 "
-                    "비교해서, 지금 별칭으로도 인포맥스 목록과 매칭이 안 되는 이름들을 찾아줍니다."
+                    "저장된 채권 스프레드 이력(인포맥스 발행사 목록)을 기준으로, "
+                    "신용등급 트리거·위너스 이력의 발행사명 중 지금 별칭으로도 매칭이 안 되는 이름들을 찾아줍니다. "
+                    "이 목록에 뜨는 회사는 '발행사별 상세 보기' 드롭다운에도 같은 회사가 두 번 나타날 수 있습니다."
                 )
                 if st.button("미매칭 발행사 찾기", key="find_unmatched_btn"):
                     with st.spinner("비교하는 중입니다..."):
                         spread_hist_admin = read_history("채권스프레드_이력")
                         trigger_hist_admin = read_history("신용등급트리거_이력")
+                        winus_hist_admin = read_history("위너스_이력")
 
                     if spread_hist_admin.empty or "발행사" not in spread_hist_admin.columns:
                         st.warning("채권 스프레드 이력이 없습니다. 먼저 인포맥스 파일을 저장해주세요.")
-                    elif trigger_hist_admin.empty or "원본발행사명" not in trigger_hist_admin.columns:
-                        st.warning("신용등급 트리거 이력이 없습니다. 먼저 트리거 파일을 저장해주세요.")
                     else:
                         infomax_set = set(spread_hist_admin["발행사"].dropna().unique())
                         infomax_set_normalized = {normalize_issuer_name(n) for n in infomax_set}
 
-                        th = trigger_hist_admin.copy()
-                        th["정규화결과"] = th["원본발행사명"].apply(normalize_issuer_name)
-                        unmatched = th[~th["정규화결과"].isin(infomax_set_normalized)]
+                        unmatched_parts = []
 
-                        if unmatched.empty:
-                            st.success("모든 신평사 발행사명이 인포맥스 목록과 매칭됩니다. 👍")
+                        if not trigger_hist_admin.empty and "원본발행사명" in trigger_hist_admin.columns:
+                            th = trigger_hist_admin.copy()
+                            th["정규화결과"] = th["원본발행사명"].apply(normalize_issuer_name)
+                            th_unmatched = th[~th["정규화결과"].isin(infomax_set_normalized)]
+                            unmatched_parts.append(
+                                th_unmatched[["신평사", "원본발행사명", "정규화결과"]].rename(
+                                    columns={"신평사": "소스", "원본발행사명": "원본표기"}
+                                )
+                            )
+
+                        if not winus_hist_admin.empty and "발행사명" in winus_hist_admin.columns:
+                            wh = winus_hist_admin.copy()
+                            wh["정규화결과"] = wh["발행사명"].apply(normalize_issuer_name)
+                            wh_unmatched = wh[~wh["정규화결과"].isin(infomax_set_normalized)]
+                            wh_unmatched = wh_unmatched[["발행사명", "정규화결과"]].rename(columns={"발행사명": "원본표기"})
+                            wh_unmatched.insert(0, "소스", "위너스(WINUS)")
+                            unmatched_parts.append(wh_unmatched)
+
+                        if not unmatched_parts:
+                            st.warning("비교할 트리거·위너스 이력이 없습니다. 먼저 각 탭에서 저장해주세요.")
                         else:
-                            summary = (
-                                unmatched.groupby(["신평사", "원본발행사명", "정규화결과"])
-                                .size().reset_index(name="건수")
-                                .sort_values(["신평사", "원본발행사명"])
-                            )
-                            st.warning(f"인포맥스 목록과 매칭되지 않는 발행사명 {len(summary)}건을 찾았습니다.")
-                            st.dataframe(summary, use_container_width=True, hide_index=True)
-                            st.caption(
-                                "위 '정규화결과' 값이 실제로는 인포맥스의 어떤 발행사명과 같은 회사인지 확인해서, "
-                                "위쪽 '새 별칭 추가'에 '정규화결과 = 인포맥스표기명' 형태로 등록해주세요."
-                            )
+                            unmatched = pd.concat(unmatched_parts, ignore_index=True)
+                            if unmatched.empty:
+                                st.success("모든 발행사명이 인포맥스 목록과 매칭됩니다. 👍")
+                            else:
+                                summary = (
+                                    unmatched.groupby(["소스", "원본표기", "정규화결과"])
+                                    .size().reset_index(name="건수")
+                                    .sort_values(["소스", "원본표기"])
+                                )
+                                st.warning(f"인포맥스 목록과 매칭되지 않는 발행사명 {len(summary)}건을 찾았습니다.")
+                                st.dataframe(summary, use_container_width=True, hide_index=True)
+                                st.caption(
+                                    "위 '정규화결과' 값이 실제로는 인포맥스의 어떤 발행사명과 같은 회사인지 확인해서, "
+                                    "위쪽 '새 별칭 추가'에 '정규화결과 = 인포맥스표기명' 형태로 등록해주세요."
+                                )
