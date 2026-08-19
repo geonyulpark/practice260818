@@ -1373,7 +1373,10 @@ with tab4:
                     "표준명에 법인접미어(주식회사/(주)/㈜)가 그대로 남아있는 경우를 찾아줍니다."
                 )
                 if st.button("검증 실행", key="validate_alias_btn"):
-                    check_df = load_issuer_aliases_full()
+                    st.session_state["alias_validation_df"] = load_issuer_aliases_full()
+
+                if "alias_validation_df" in st.session_state:
+                    check_df = st.session_state["alias_validation_df"]
                     validation = validate_alias_table(check_df)
 
                     n_dup = check_df.loc[
@@ -1411,6 +1414,7 @@ with tab4:
                         if st.button("이 정리안으로 저장", key="apply_cleaned_alias_btn"):
                             try:
                                 save_alias_excel_upload(cleaned_preview)
+                                del st.session_state["alias_validation_df"]
                                 st.success("정리된 내용으로 저장했습니다.")
                                 st.rerun()
                             except Exception as e:
