@@ -821,6 +821,24 @@ with tab2:
                         append_history_multi(unified, "신용등급트리거_이력", dedup_cols=["신평사", "기준일"])
                     read_history.clear()
                     st.success(f"{len(unified)}건을 이력에 저장했습니다.")
+
+                    # 저장 직후 즉시 재조회해서 실제로 반영됐는지 앱 안에서 바로 확인
+                    verify_df = read_history("신용등급트리거_이력")
+                    if verify_df.empty:
+                        st.error(
+                            "⚠️ 저장은 오류 없이 끝났지만, 방금 다시 읽어보니 시트가 비어 있습니다. "
+                            "GOOGLE_SHEET_ID가 지금 보고 계신 시트와 다른 시트를 가리키고 있을 수 있습니다. "
+                            "Secrets의 GOOGLE_SHEET_ID 값을 다시 확인해주세요."
+                        )
+                    else:
+                        st.info(f"✅ 저장 직후 재확인: 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
+
+                    sheet_id = st.secrets.get("GOOGLE_SHEET_ID", "")
+                    if sheet_id:
+                        st.caption(
+                            f"현재 연결된 시트: https://docs.google.com/spreadsheets/d/{sheet_id}/edit "
+                            "(이 링크가 지금 보고 계신 시트와 같은지 확인해주세요)"
+                        )
                 except Exception as e:
                     st.error(f"저장 중 오류가 발생했습니다: {e}")
     else:
