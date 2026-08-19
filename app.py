@@ -1375,6 +1375,11 @@ elif page == "채권 스프레드":
 
                 maturity_cols = [c for c in ["3M", "6M", "9M", "1Y", "3Y", "5Y"] if c in view.columns]
                 if maturity_cols and not view.empty:
+                    # Google Sheets 이력에서 불러온 값은 전부 문자열이라, 평균 계산 전에 숫자로 변환한다
+                    view = view.copy()
+                    for c in maturity_cols:
+                        view[c] = pd.to_numeric(view[c], errors="coerce")
+
                     st.subheader("등급별 만기별 평균 수익률 (채권종류별)")
                     st.caption("은행채·카드채·기타금융채·공모무보증은 같은 등급이라도 스프레드 수준이 달라 채권종류별로 따로 계산합니다.")
                     rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
