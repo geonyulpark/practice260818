@@ -1881,18 +1881,37 @@ elif page == "신용등급 트리거":
                     hit = as_of_trigger
 
                 # --- 상향/하향 조건 충족 기업을 칩(pill) 형태로 조밀하게 나열, 클릭하면 아래 목록이 그 기업으로 좁혀짐 ---
-                up_companies = sorted(hit[hit.get("충족여부") == "🟢"]["표준명"].dropna().unique())
-                down_companies = sorted(hit[hit.get("충족여부") == "🔴"]["표준명"].dropna().unique())
+                # 가나다 순이 아니라 '충족 건수'가 많은 순으로 정렬
+                up_counts = hit[hit.get("충족여부") == "🟢"]["표준명"].value_counts()
+                down_counts = hit[hit.get("충족여부") == "🔴"]["표준명"].value_counts()
+                up_companies_all = list(up_counts.index)
+                down_companies_all = list(down_counts.index)
 
-                st.markdown(f"**🟢 상향 조건 충족 ({len(up_companies)}개사)**")
-                clicked_up = render_company_pills(up_companies, key="trigger_up_pills", other_key="trigger_down_pills")
+                MAX_SHOW = 20
+                if "trigger_show_all_up" not in st.session_state:
+                    st.session_state["trigger_show_all_up"] = False
+                if "trigger_show_all_down" not in st.session_state:
+                    st.session_state["trigger_show_all_down"] = False
+
+                st.markdown(f"**🟢 상향 조건 충족 ({len(up_companies_all)}개사, 충족 건수 많은 순)**")
+                up_list = up_companies_all if st.session_state["trigger_show_all_up"] else up_companies_all[:MAX_SHOW]
+                clicked_up = render_company_pills(up_list, key="trigger_up_pills", other_key="trigger_down_pills")
                 if clicked_up:
                     st.session_state["trigger_pick"] = clicked_up
+                if len(up_companies_all) > MAX_SHOW and not st.session_state["trigger_show_all_up"]:
+                    if st.button(f"전체보기 (총 {len(up_companies_all)}개)", key="trigger_up_show_all_btn"):
+                        st.session_state["trigger_show_all_up"] = True
+                        st.rerun()
 
-                st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies)}개사)**")
-                clicked_down = render_company_pills(down_companies, key="trigger_down_pills", other_key="trigger_up_pills")
+                st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies_all)}개사, 충족 건수 많은 순)**")
+                down_list = down_companies_all if st.session_state["trigger_show_all_down"] else down_companies_all[:MAX_SHOW]
+                clicked_down = render_company_pills(down_list, key="trigger_down_pills", other_key="trigger_up_pills")
                 if clicked_down:
                     st.session_state["trigger_pick"] = clicked_down
+                if len(down_companies_all) > MAX_SHOW and not st.session_state["trigger_show_all_down"]:
+                    if st.button(f"전체보기 (총 {len(down_companies_all)}개)", key="trigger_down_show_all_btn"):
+                        st.session_state["trigger_show_all_down"] = True
+                        st.rerun()
 
                 # 선택된 회사가 지금 목록에 더 이상 없으면(검색어 변경 등) 선택 해제
                 if st.session_state.get("trigger_pick") and st.session_state["trigger_pick"] not in set(hit["표준명"].dropna()):
@@ -1919,6 +1938,9 @@ elif page == "신용등급 트리거":
                         actual_col_name = f"실제 수치({labels[0]})"
 
                 if "실제수치" in display_df.columns:
+                    display_df["실제수치"] = pd.to_numeric(display_df["실제수치"], errors="coerce").apply(
+                        lambda v: f"{v:.2f}" if pd.notna(v) else "-"
+                    )
                     display_df = display_df.rename(columns={"실제수치": actual_col_name})
 
                 _registered_names = get_registered_standard_names()
