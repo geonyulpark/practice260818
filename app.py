@@ -221,12 +221,14 @@ def extract_effective_date(file_obj, sheet_name=None, max_rows=30):
 ALIAS_SHEET_NAME = "발행사별칭"
 
 ALIAS_SOURCE_COLUMNS = ["한국신용평가", "나이스신용평가", "한국기업평가", "인포맥스", "위너스(WINUS)", "DART", "기타"]
-ALIAS_HEADER = ["표준명"] + ALIAS_SOURCE_COLUMNS
+ALIAS_EXTRA_COLUMNS = ["법인고유번호"]  # 이름이 아닌 코드값 — 발행사명 별칭 로직에는 포함하지 않는다
+ALIAS_HEADER = ["표준명"] + ALIAS_SOURCE_COLUMNS + ALIAS_EXTRA_COLUMNS
 
 
 def _migrate_alias_rows(old_header: list, old_rows: list) -> list:
-    """예전 형식(별칭/표준명 2열, 또는 별칭/표준명/출처 3열 - 세로형)을
-    새 가로형(표준명 + 소스별 열)으로 변환. 이미 가로형이면 그대로 통과."""
+    """예전 형식(별칭/표준명 2열, 또는 별칭/표준명/출처 3열 - 세로형)이나
+    열이 일부 빠진 예전 가로형을 지금의 가로형(표준명 + 소스별 열 + 법인고유번호)으로 변환.
+    이미 완전히 같은 형식이면 그대로 통과."""
     if old_header == ALIAS_HEADER:
         return old_rows
 
@@ -248,10 +250,19 @@ def _migrate_alias_rows(old_header: list, old_rows: list) -> list:
 
         new_rows = []
         for canon, src_map in companies.items():
-            new_rows.append([canon] + [src_map.get(c, "") for c in ALIAS_SOURCE_COLUMNS])
+            new_rows.append([canon] + [src_map.get(c, "") for c in ALIAS_SOURCE_COLUMNS] + [""] * len(ALIAS_EXTRA_COLUMNS))
         return new_rows
 
-    # 알 수 없는 형식이면 표준명 열만 있다고 가정하고 나머지는 빈 값 처리
+    if "표준명" in old_header:
+        # 이미 가로형인데 열 구성만 다른 경우(예: 법인고유번호 열이 새로 추가된 경우)
+        # 열 이름 기준으로 재정렬하고, 없는 열은 빈 값으로 채운다 — 기존 데이터는 보존.
+        migrated = []
+        for row in old_rows:
+            row_map = {old_header[i]: (row[i] if i < len(row) else "") for i in range(len(old_header))}
+            migrated.append([row_map.get(c, "") for c in ALIAS_HEADER])
+        return migrated
+
+    # 표준명 열조차 없는 완전히 알 수 없는 형식
     return []
 
 
@@ -321,7 +332,7 @@ def load_issuer_aliases() -> dict:
     result = {}
     if df.empty or "표준명" not in df.columns:
         return result
-    source_cols = [c for c in df.columns if c != "표준명"]
+    source_cols = [c for c in df.columns if c != "표준명" and c not in ALIAS_EXTRA_COLUMNS]
     for _, row in df.iterrows():
         canon = str(row.get("표준명", "")).strip()
         if not canon:
@@ -349,7 +360,7 @@ def upsert_issuer_alias(canonical: str, source_col: str, alias: str):
             load_issuer_aliases_full.clear()
             return
 
-    new_row = [canonical] + ["" for _ in ALIAS_SOURCE_COLUMNS]
+    new_row = [canonical] + ["" for _ in ALIAS_SOURCE_COLUMNS] + ["" for _ in ALIAS_EXTRA_COLUMNS]
     if source_col in ALIAS_SOURCE_COLUMNS:
         new_row[1 + ALIAS_SOURCE_COLUMNS.index(source_col)] = alias
     ws.append_row(new_row)
@@ -378,7 +389,7 @@ def upsert_issuer_aliases_bulk(pairs: list, source_col: str):
         if canonical in canon_to_row and src_idx is not None:
             ws.update_cell(canon_to_row[canonical], src_idx + 1, alias)
         else:
-            new_row = [canonical] + ["" for _ in ALIAS_SOURCE_COLUMNS]
+            new_row = [canonical] + ["" for _ in ALIAS_SOURCE_COLUMNS] + ["" for _ in ALIAS_EXTRA_COLUMNS]
             if source_col in ALIAS_SOURCE_COLUMNS:
                 new_row[1 + ALIAS_SOURCE_COLUMNS.index(source_col)] = alias
             new_rows.append(new_row)
@@ -422,7 +433,7 @@ def save_alias_excel_upload(df: pd.DataFrame):
     df.columns = [str(c).strip() for c in df.columns]
     if "표준명" not in df.columns:
         raise ValueError("업로드한 엑셀에 '표준명' 열이 없습니다.")
-    for col in ALIAS_SOURCE_COLUMNS:
+    for col in ALIAS_SOURCE_COLUMNS + ALIAS_EXTRA_COLUMNS:
         if col not in df.columns:
             df[col] = ""
     df = df[ALIAS_HEADER]
@@ -451,7 +462,7 @@ def validate_alias_table(df: pd.DataFrame) -> dict:
     if df.empty or "표준명" not in df.columns:
         return result
 
-    source_cols = [c for c in df.columns if c != "표준명"]
+    source_cols = [c for c in df.columns if c != "표준명" and c not in ALIAS_EXTRA_COLUMNS]
 
     # 1) 표준명 완전 중복행
     dup_mask = df["표준명"].astype(str).str.strip().duplicated(keep=False) & (df["표준명"].astype(str).str.strip() != "")
@@ -499,6 +510,55 @@ def build_cleaned_alias_table(df: pd.DataFrame) -> pd.DataFrame:
     merged = cleaned.groupby("표준명", as_index=False).agg({c: first_non_blank for c in other_cols})
     return merged[ALIAS_HEADER] if all(c in merged.columns for c in ALIAS_HEADER) else merged
 
+
+
+@st.cache_data(ttl=60 * 60 * 24)
+def load_corp_code_map(api_key: str) -> dict:
+    """DART Open API에서 전체 기업 고유번호 목록을 받아 {회사명: corp_code} 딕셔너리로 반환. 24시간 캐시."""
+    url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={api_key}"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    xml_bytes = zf.read(zf.namelist()[0])
+    root = ET.fromstring(xml_bytes)
+    mapping = {}
+    for item in root.findall("list"):
+        corp_name = (item.findtext("corp_name") or "").strip()
+        corp_code = (item.findtext("corp_code") or "").strip()
+        if corp_name and corp_code:
+            mapping[corp_name] = corp_code
+    return mapping
+
+
+def find_corp_code(issuer_name: str, corp_map: dict):
+    """발행사명으로 DART corp_code를 찾는다 (정확일치 → 접미어 제거 → 부분일치 순)."""
+    if issuer_name in corp_map:
+        return corp_map[issuer_name]
+    for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
+        candidate = issuer_name.replace(suffix, "").strip()
+        if candidate in corp_map:
+            return corp_map[candidate]
+    candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
+    if len(candidates) == 1:
+        return corp_map[candidates[0]]
+    return None
+
+
+def find_dart_name(issuer_name: str, corp_map: dict):
+    """발행사명으로 DART상의 정식 회사명을 찾는다 (find_corp_code와 같은 매칭 규칙, 결과는 이름)."""
+    if pd.isna(issuer_name):
+        return None
+    issuer_name = str(issuer_name).strip()
+    if issuer_name in corp_map:
+        return issuer_name
+    for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
+        candidate = issuer_name.replace(suffix, "").strip()
+        if candidate in corp_map:
+            return candidate
+    candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 def normalize_issuer_name(name):
@@ -633,33 +693,6 @@ if page == "데이터 업로드":
     with upload_tab1:
         st.caption("인포맥스 채권 수익률 파일을 업로드하면 '공모/무보증' 발행사만 자동으로 필터링해 보여줍니다.")
 
-        @st.cache_data(ttl=60 * 60 * 24)
-        def load_corp_code_map(api_key: str):
-            url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={api_key}"
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-            zf = zipfile.ZipFile(io.BytesIO(resp.content))
-            xml_bytes = zf.read(zf.namelist()[0])
-            root = ET.fromstring(xml_bytes)
-            mapping = {}
-            for item in root.findall("list"):
-                corp_name = (item.findtext("corp_name") or "").strip()
-                corp_code = (item.findtext("corp_code") or "").strip()
-                if corp_name and corp_code:
-                    mapping[corp_name] = corp_code
-            return mapping
-
-        def find_corp_code(issuer_name: str, corp_map: dict):
-            if issuer_name in corp_map:
-                return corp_map[issuer_name]
-            for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
-                candidate = issuer_name.replace(suffix, "").strip()
-                if candidate in corp_map:
-                    return corp_map[candidate]
-            candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
-            if len(candidates) == 1:
-                return corp_map[candidates[0]]
-            return None
 
         @st.cache_data(ttl=60 * 60 * 24)
         def fetch_financials(corp_code: str, api_key: str):
@@ -1992,6 +2025,67 @@ elif page == "관리자 설정":
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"삭제 중 오류가 발생했습니다: {e}")
+
+                st.markdown("---")
+                st.subheader("DART 기업명·법인고유번호 일괄 매칭")
+                st.caption(
+                    "전자공시시스템(DART)의 전체 기업 목록(회사명 + 고유번호)을 한 번에 받아와서, "
+                    "별칭 표의 표준명과 자동으로 매칭해 'DART' 열과 '법인고유번호' 열을 함께 채웁니다. "
+                    "DART 쪽 기업 목록은 하루 단위로 캐시되니, 최신 목록이 필요하면 버튼을 다시 누르면 됩니다."
+                )
+                if not DART_API_KEY:
+                    st.warning(
+                        "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud Secrets에 "
+                        "DART_API_KEY = \"발급받은키\" 를 등록해주세요."
+                    )
+                else:
+                    if st.button("DART 기업 목록 불러와서 매칭", key="dart_match_btn"):
+                        with st.spinner("DART 기업 목록을 받아오는 중입니다 (처음 조회 시 몇 초 걸릴 수 있습니다)..."):
+                            corp_map = load_corp_code_map(DART_API_KEY)
+                        st.caption(f"DART에 등록된 전체 기업 수: {len(corp_map):,}개")
+
+                        alias_df_for_dart = load_issuer_aliases_full()
+                        if alias_df_for_dart.empty or "표준명" not in alias_df_for_dart.columns:
+                            st.info("별칭 표에 등록된 회사가 아직 없습니다. 먼저 위쪽에서 회사를 추가해주세요.")
+                        else:
+                            updated = alias_df_for_dart.copy()
+                            if "법인고유번호" not in updated.columns:
+                                updated["법인고유번호"] = ""
+                            matched_count, filled_rows = 0, []
+                            for idx, row in updated.iterrows():
+                                canon = str(row.get("표준명", "")).strip()
+                                existing_dart = str(row.get("DART", "")).strip() if "DART" in updated.columns else ""
+                                existing_code = str(row.get("법인고유번호", "")).strip()
+                                if not canon or (existing_dart and existing_code):
+                                    continue  # 이름·코드 둘 다 이미 있으면 건드리지 않음
+                                matched_name = find_dart_name(canon, corp_map)
+                                if matched_name:
+                                    if not existing_dart:
+                                        updated.at[idx, "DART"] = matched_name
+                                    if not existing_code:
+                                        updated.at[idx, "법인고유번호"] = corp_map.get(matched_name, "")
+                                    matched_count += 1
+                                    filled_rows.append({
+                                        "표준명": canon, "DART 매칭명": matched_name,
+                                        "법인고유번호": corp_map.get(matched_name, "")
+                                    })
+
+                            st.session_state["dart_match_preview"] = updated
+                            st.success(f"{matched_count}개 회사에 새로 DART 회사명/법인고유번호를 채웠습니다 (기존에 값이 있던 칸은 건드리지 않았습니다).")
+                            if filled_rows:
+                                st.dataframe(pd.DataFrame(filled_rows), use_container_width=True, hide_index=True)
+
+                    if "dart_match_preview" in st.session_state:
+                        st.markdown("**매칭 결과 미리보기 (DART·법인고유번호 열 반영됨)**")
+                        st.dataframe(st.session_state["dart_match_preview"], use_container_width=True, hide_index=True, height=300)
+                        if st.button("이 매칭 결과 저장", key="save_dart_match_btn"):
+                            try:
+                                save_alias_excel_upload(st.session_state["dart_match_preview"])
+                                del st.session_state["dart_match_preview"]
+                                st.success("DART 매칭 결과를 저장했습니다.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"저장 중 오류가 발생했습니다: {e}")
 
                 st.markdown("---")
                 st.subheader("미매칭 발행사 자동 탐지")
