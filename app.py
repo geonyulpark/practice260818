@@ -1298,17 +1298,26 @@ with tab3:
                     as_of_trigger = th_valid[keep_mask]
 
             # --- 해당 시점 기준 최신 위너스 익스포저 (query_date 이하 중 가장 최근 날짜) ---
+            st.subheader(f"{query_date} 시점 기준 위너스 익스포저 현황")
             if winus_hist.empty or "업데이트일자" not in winus_hist.columns:
+                st.info("저장된 위너스 이력이 없습니다. 위쪽 '위너스(WINUS) 익스포저 업로드'에서 파일을 올리고 '위너스 이력에 저장'을 눌러주세요.")
                 as_of_winus = pd.DataFrame()
             else:
                 wh = winus_hist.copy()
                 wh["업데이트일자"] = wh["업데이트일자"].astype(str)
                 wh_valid = wh[wh["업데이트일자"] <= query_date]
                 if wh_valid.empty:
+                    available_winus_dates = sorted(wh["업데이트일자"].unique())
+                    st.info(
+                        f"{query_date} 이전에 저장된 위너스 이력이 없습니다. "
+                        f"저장된 날짜: {', '.join(available_winus_dates[-10:])}"
+                        + (" ..." if len(available_winus_dates) > 10 else "")
+                    )
                     as_of_winus = pd.DataFrame()
                 else:
                     latest_winus_date = wh_valid["업데이트일자"].max()
                     as_of_winus = wh_valid[wh_valid["업데이트일자"] == latest_winus_date]
+                    st.caption(f"적용된 위너스 기준일: {latest_winus_date} ({len(as_of_winus)}개 발행사)")
 
             # --- 발행사 선택 목록: 채권스프레드·트리거·위너스 3개 소스를 합쳐서 구성 ---
             issuer_col_name = "발행사" if "발행사" in day_spread.columns else None
