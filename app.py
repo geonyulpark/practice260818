@@ -735,6 +735,10 @@ with tab1:
         cat_grade = result["신용등급그룹"].apply(_split_category_grade)
         result.insert(0, "채권종류", [c for c, g in cat_grade])
         result["신용등급그룹"] = [g for c, g in cat_grade]
+        # 'AAA(산금-이표)', 'AAA(중금-할인)' 같은 괄호 부가설명은 제거하고 순수 등급만 남긴다
+        result["신용등급그룹"] = (
+            result["신용등급그룹"].astype(str).str.replace(r"\(.*\)", "", regex=True).str.strip()
+        )
 
         result["업종구분"] = result["업종구분"].fillna("미분류")
 
@@ -885,7 +889,9 @@ with tab1:
         st.dataframe(view, use_container_width=True, hide_index=True)
 
         st.subheader("신용등급별 발행사 수")
-        st.bar_chart(view.groupby(["채권종류", "신용등급그룹"]).size().rename("발행사 수"))
+        counts_by_type_rating = view.groupby(["채권종류", "신용등급그룹"]).size()
+        counts_by_type_rating.index = [f"{t} {r}" for t, r in counts_by_type_rating.index]
+        st.bar_chart(counts_by_type_rating.rename("발행사 수"))
 
         if maturity_cols:
             st.subheader("등급별 만기별 평균 수익률 (채권종류별)")
