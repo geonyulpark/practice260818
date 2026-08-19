@@ -478,6 +478,7 @@ def build_cleaned_alias_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+def normalize_issuer_name(name):
     """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + Google Sheets 별칭)."""
     if pd.isna(name):
         return None
@@ -1354,7 +1355,15 @@ with tab4:
                                 uploaded_df = pd.read_excel(alias_upload)
                                 save_alias_excel_upload(uploaded_df)
                                 st.success(f"{len(uploaded_df)}개 회사 정보로 별칭 표를 갱신했습니다.")
-                                st.rerun()
+
+                                verify_df = load_issuer_aliases_full()
+                                if len(verify_df) == len(uploaded_df):
+                                    st.info(f"✅ 저장 직후 재확인: 클라우드 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
+                                else:
+                                    st.error(
+                                        f"⚠️ 재확인해보니 {len(verify_df)}행이 조회됩니다 (기대값 {len(uploaded_df)}행). "
+                                        "GOOGLE_SHEET_ID 설정을 확인해주세요."
+                                    )
                             except Exception as e:
                                 st.error(f"저장 중 오류가 발생했습니다: {e}")
 
@@ -1415,8 +1424,22 @@ with tab4:
                             try:
                                 save_alias_excel_upload(cleaned_preview)
                                 del st.session_state["alias_validation_df"]
-                                st.success("정리된 내용으로 저장했습니다.")
-                                st.rerun()
+                                st.success(f"정리된 내용({len(cleaned_preview)}행)을 클라우드 시트에 저장했습니다.")
+
+                                verify_df = load_issuer_aliases_full()
+                                if len(verify_df) == len(cleaned_preview):
+                                    st.info(f"✅ 저장 직후 재확인: 클라우드 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
+                                else:
+                                    st.error(
+                                        f"⚠️ 저장은 오류 없이 끝났지만, 재확인해보니 {len(verify_df)}행이 조회됩니다 "
+                                        f"(기대값 {len(cleaned_preview)}행). GOOGLE_SHEET_ID가 다른 시트를 "
+                                        "가리키고 있을 수 있으니 Secrets 설정을 확인해주세요."
+                                    )
+                                sheet_id = st.secrets.get("GOOGLE_SHEET_ID", "")
+                                if sheet_id:
+                                    st.caption(
+                                        f"현재 연결된 시트: https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+                                    )
                             except Exception as e:
                                 st.error(f"저장 중 오류가 발생했습니다: {e}")
 
