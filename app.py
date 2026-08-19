@@ -696,6 +696,189 @@ def fetch_financials_detail(corp_code: str, api_key: str):
     return None
 
 
+# ------------------------------------------------------------
+# 재무상태표(BS) + 연도별/분기별 손익계산서(IS) 종합 조회
+# ------------------------------------------------------------
+BS_ACCOUNTS = {"총자산": ["자산총계"], "총부채": ["부채총계"], "자기자본": ["자본총계"]}
+IS_ACCOUNTS = {
+    "매출액": ["매출액", "수익(매출액)", "영업수익"],
+    "영업이익": ["영업이익", "영업이익(손실)"],
+    "당기순이익": ["당기순이익", "당기순이익(손실)"],
+}
+
+UNIT_DIVISORS = {"원": 1, "천원": 1_000, "백만원": 1_000_000, "억원": 100_000_000,
+                  "십억원": 1_000_000_000, "조원": 1_000_000_000_000}
+
+
+def fmt_unit(x, unit):
+    """금액을 선택한 단위로 환산해서 콤마 포함 문자열로 변환."""
+    if x is None:
+        return "-"
+    divisor = UNIT_DIVISORS.get(unit, 1)
+    val = x / divisor
+    return f"{val:,.0f}" if divisor == 1 else f"{val:,.1f}"
+
+
+def fmt_unit_change(cur, prev, unit):
+    """증감(선택 단위)과 증감률(%)을 함께 반환."""
+    if cur is None or prev is None or prev == 0:
+        return "-", "-"
+    diff = cur - prev
+    pct = diff / abs(prev) * 100
+    sign = "+" if diff >= 0 else ""
+    divisor = UNIT_DIVISORS.get(unit, 1)
+    diff_val = diff / divisor
+    diff_str = f"{sign}{diff_val:,.0f}" if divisor == 1 else f"{sign}{diff_val:,.1f}"
+    return diff_str, f"{sign}{pct:.1f}%"
+
+
+def _to_num(x):
+    try:
+        return int(str(x).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+@st.cache_data(ttl=60 * 60 * 24)
+def _fetch_dart_report(corp_code: str, api_key: str, year: int, reprt_code: str):
+    """단일 (연도, 보고서코드) 조합의 재무제표 원본 목록을 가져온다.
+    연결재무제표(CFS) 우선, 없으면 개별재무제표(OFS). 실패 시 (None, None)."""
+    url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+    for fs_div in ["CFS", "OFS"]:
+        params = {"crtfc_key": api_key, "corp_code": corp_code,
+                  "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div}
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            data = resp.json()
+        except Exception:
+            continue
+        if data.get("status") == "000" and data.get("list"):
+            return data["list"], fs_div
+    return None, None
+
+
+def _extract_bs_values(rows):
+    result = {}
+    for row in rows or []:
+        if row.get("sj_div") != "BS":
+            continue
+        name = row.get("account_nm", "")
+        for metric, names in BS_ACCOUNTS.items():
+            if metric in result or name not in names:
+                continue
+            result[metric] = {
+                "당기말": _to_num(row.get("thstrm_amount")),
+                "전기말": _to_num(row.get("frmtrm_amount")),
+                "전전기말": _to_num(row.get("bfefrmtrm_amount")),
+            }
+    return result
+
+
+def _extract_is_values(rows):
+    result = {}
+    for row in rows or []:
+        if row.get("sj_div") not in ("IS", "CIS"):
+            continue
+        name = row.get("account_nm", "")
+        for metric, names in IS_ACCOUNTS.items():
+            if metric in result or name not in names:
+                continue
+            result[metric] = {
+                "당기": _to_num(row.get("thstrm_amount")),
+                "당기누적": _to_num(row.get("thstrm_add_amount")),
+                "전기": _to_num(row.get("frmtrm_amount")),
+                "전전기": _to_num(row.get("bfefrmtrm_amount")),
+            }
+    return result
+
+
+@st.cache_data(ttl=60 * 60 * 24)
+def fetch_full_financial_report(corp_code: str, api_key: str):
+    """재무상태표(총자산/총부채/자기자본 추이)와 연도별·분기별 손익계산서를 종합 조회.
+    여러 번의 DART 조회가 필요해 다소 시간이 걸릴 수 있다 (각 조회는 24시간 캐시)."""
+    if not corp_code:
+        return None
+
+    this_year = datetime.date.today().year
+    last_year = this_year - 1
+
+    result = {"BS": None, "연간손익": None, "분기손익": None, "meta": {}}
+
+    # --- 1) 재무상태표: 올해 가장 최근 보고서 → 없으면 작년 사업보고서 ---
+    for year, reprt_code, label in [
+        (this_year, "11014", f"{this_year} 3분기말"), (this_year, "11012", f"{this_year} 반기말"),
+        (this_year, "11013", f"{this_year} 1분기말"), (last_year, "11011", f"{last_year} 사업연도말"),
+    ]:
+        rows, fs_div = _fetch_dart_report(corp_code, api_key, year, reprt_code)
+        if rows:
+            bs = _extract_bs_values(rows)
+            if bs:
+                result["BS"] = bs
+                result["meta"]["BS_기준"] = label
+                break
+
+    # --- 2) 연도별 손익계산서: 작년 사업보고서(전년+전전년) + 올해 최신 누적 ---
+    rows_annual, _ = _fetch_dart_report(corp_code, api_key, last_year, "11011")
+    annual_is = _extract_is_values(rows_annual)
+
+    latest_ytd, latest_ytd_label = {}, None
+    for reprt_code, label in [("11014", f"{this_year} 3분기 누적(9개월)"),
+                               ("11012", f"{this_year} 반기 누적(6개월)"),
+                               ("11013", f"{this_year} 1분기 누적(3개월)")]:
+        rows, _ = _fetch_dart_report(corp_code, api_key, this_year, reprt_code)
+        is_vals = _extract_is_values(rows)
+        if is_vals:
+            latest_ytd, latest_ytd_label = is_vals, label
+            break
+
+    result["연간손익"] = {
+        "전전년도": {"라벨": f"{last_year - 1}년(연간)",
+                   "값": {m: annual_is.get(m, {}).get("전전기") for m in IS_ACCOUNTS}},
+        "전년도": {"라벨": f"{last_year}년(연간)",
+                 "값": {m: annual_is.get(m, {}).get("전기") for m in IS_ACCOUNTS}},
+        "올해누적": {"라벨": latest_ytd_label or "조회 실패",
+                  "값": {m: latest_ytd.get(m, {}).get("당기누적") for m in IS_ACCOUNTS}},
+    }
+
+    # --- 3) 분기별 손익계산서: 작년 1~4분기(단독) + 올해 최신 분기(단독) ---
+    rows_q1, _ = _fetch_dart_report(corp_code, api_key, last_year, "11013")
+    is_q1 = _extract_is_values(rows_q1)
+    rows_h1, _ = _fetch_dart_report(corp_code, api_key, last_year, "11012")
+    is_h1 = _extract_is_values(rows_h1)
+    rows_q3, _ = _fetch_dart_report(corp_code, api_key, last_year, "11014")
+    is_q3 = _extract_is_values(rows_q3)
+
+    q4 = {}
+    for m in IS_ACCOUNTS:
+        annual_val = annual_is.get(m, {}).get("당기")     # 사업보고서 당기 = 연간 전체
+        q3_cum = is_q3.get(m, {}).get("당기누적")          # 3분기보고서 누적 = 9개월
+        q4[m] = (annual_val - q3_cum) if (annual_val is not None and q3_cum is not None) else None
+
+    q_data = {
+        "1분기": {m: is_q1.get(m, {}).get("당기") for m in IS_ACCOUNTS},
+        "2분기": {m: is_h1.get(m, {}).get("당기") for m in IS_ACCOUNTS},
+        "3분기": {m: is_q3.get(m, {}).get("당기") for m in IS_ACCOUNTS},
+        "4분기": q4,
+    }
+
+    latest_q, latest_q_label = {}, None
+    for reprt_code, label in [("11014", f"{this_year} 3분기"), ("11012", f"{this_year} 2분기"),
+                               ("11013", f"{this_year} 1분기")]:
+        rows, _ = _fetch_dart_report(corp_code, api_key, this_year, reprt_code)
+        is_vals = _extract_is_values(rows)
+        if is_vals:
+            latest_q = {m: is_vals.get(m, {}).get("당기") for m in IS_ACCOUNTS}
+            latest_q_label = label
+            break
+
+    result["분기손익"] = {
+        "직전년도": {"연도": last_year, "분기": q_data},
+        "올해최신분기": {"라벨": latest_q_label or "조회 실패", "값": latest_q},
+    }
+
+    return result
+
+
 def normalize_issuer_name(name):
     """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + Google Sheets 별칭)."""
     if pd.isna(name):
@@ -1903,9 +2086,8 @@ elif page == "발행사별 상세보기":
                                 "관리자 탭에서 법인고유번호를 직접 등록해두시면 더 정확하게 찾을 수 있습니다."
                             )
                         else:
-                            with st.spinner("DART에서 기업개황·재무제표를 조회하는 중입니다..."):
+                            with st.spinner("DART에서 기업개황을 조회하는 중입니다..."):
                                 overview = fetch_company_overview(corp_code, DART_API_KEY)
-                                fin_detail = fetch_financials_detail(corp_code, DART_API_KEY)
 
                             st.caption("기업개황")
                             if overview:
@@ -1927,46 +2109,77 @@ elif page == "발행사별 상세보기":
                                 st.caption("기업개황 정보를 가져오지 못했습니다.")
 
                             st.caption("재무제표")
-                            if fin_detail and fin_detail.get("항목"):
-                                def _fmt_amt(x):
-                                    return f"{x:,}" if x is not None else "-"
+                            unit = st.selectbox(
+                                "금액 단위", options=["원", "천원", "백만원", "억원", "십억원", "조원"],
+                                index=3, key="fin_unit_select"
+                            )
 
-                                def _fmt_change(cur, prev):
-                                    if cur is None or prev is None or prev == 0:
-                                        return "-", "-"
-                                    diff = cur - prev
-                                    pct = diff / abs(prev) * 100
-                                    sign = "+" if diff >= 0 else ""
-                                    return f"{sign}{diff:,}", f"{sign}{pct:.1f}%"
+                            with st.spinner("DART에서 재무제표를 조회하는 중입니다 (여러 보고서를 확인하느라 다소 걸릴 수 있습니다)..."):
+                                full_report = fetch_full_financial_report(corp_code, DART_API_KEY)
 
-                                fin_rows = []
-                                for metric in ["매출액", "영업이익", "당기순이익"]:
-                                    d = fin_detail["항목"].get(metric, {})
-                                    cur, cur_cum = d.get("당기"), d.get("당기누적")
-                                    prev, prev_cum = d.get("전년동기"), d.get("전년동기누적")
-                                    diff_q, pct_q = _fmt_change(cur, prev)
-                                    diff_cum, pct_cum = _fmt_change(cur_cum, prev_cum)
-                                    fin_rows.append({
-                                        "항목": metric,
-                                        "당기": _fmt_amt(cur),
-                                        "전년동기": _fmt_amt(prev),
-                                        "증감(당기)": diff_q,
-                                        "증감률(당기)": pct_q,
-                                        "당기누적": _fmt_amt(cur_cum),
-                                        "전년동기누적": _fmt_amt(prev_cum),
-                                        "증감(누적)": diff_cum,
-                                        "증감률(누적)": pct_cum,
-                                    })
-                                st.caption(
-                                    f"기준: {fin_detail.get('기준')} "
-                                    f"({'연결' if fin_detail.get('fs_div') == 'CFS' else '별도'}재무제표) — "
-                                    "'전년동기'는 작년 같은 분/반기 실적입니다 (직전 분기와의 비교가 아닙니다)."
-                                )
-                                st.dataframe(
-                                    pd.DataFrame(fin_rows), use_container_width=True, hide_index=True
-                                )
-                            else:
+                            if not full_report:
                                 st.caption("재무제표 정보를 가져오지 못했습니다.")
+                            else:
+                                # --- 1) 재무상태표: 총자산/총부채/자기자본 ---
+                                st.markdown(f"**재무상태표** ({unit})")
+                                bs = full_report.get("BS")
+                                if bs:
+                                    st.caption(f"기준: {full_report['meta'].get('BS_기준', '-')}")
+                                    bs_rows = []
+                                    for metric in ["총자산", "총부채", "자기자본"]:
+                                        d = bs.get(metric, {})
+                                        prev2, prev1, cur = d.get("전전기말"), d.get("전기말"), d.get("당기말")
+                                        diff, pct = fmt_unit_change(cur, prev1, unit)
+                                        bs_rows.append({
+                                            "항목": metric,
+                                            "전전기말": fmt_unit(prev2, unit),
+                                            "전기말": fmt_unit(prev1, unit),
+                                            "당기(최신)": fmt_unit(cur, unit),
+                                            "증감(전기말 대비)": diff,
+                                            "증감률": pct,
+                                        })
+                                    st.dataframe(pd.DataFrame(bs_rows), use_container_width=True, hide_index=True)
+                                else:
+                                    st.caption("재무상태표 정보를 가져오지 못했습니다.")
+
+                                # --- 2) 연도별 손익계산서 ---
+                                st.markdown(f"**연도별 손익계산서** ({unit})")
+                                annual = full_report.get("연간손익")
+                                if annual:
+                                    labels = [annual["전전년도"]["라벨"], annual["전년도"]["라벨"], annual["올해누적"]["라벨"]]
+                                    st.caption("열: " + " / ".join(labels))
+                                    annual_rows = []
+                                    for metric in ["매출액", "영업이익", "당기순이익"]:
+                                        annual_rows.append({
+                                            "항목": metric,
+                                            labels[0]: fmt_unit(annual["전전년도"]["값"].get(metric), unit),
+                                            labels[1]: fmt_unit(annual["전년도"]["값"].get(metric), unit),
+                                            labels[2]: fmt_unit(annual["올해누적"]["값"].get(metric), unit),
+                                        })
+                                    st.dataframe(pd.DataFrame(annual_rows), use_container_width=True, hide_index=True)
+                                else:
+                                    st.caption("연도별 손익계산서 정보를 가져오지 못했습니다.")
+
+                                # --- 3) 분기별 손익계산서 ---
+                                st.markdown(f"**분기별 손익계산서** ({unit})")
+                                quarterly = full_report.get("분기손익")
+                                if quarterly:
+                                    last_yr = quarterly["직전년도"]["연도"]
+                                    q_map = quarterly["직전년도"]["분기"]
+                                    latest_label = quarterly["올해최신분기"]["라벨"]
+                                    latest_vals = quarterly["올해최신분기"]["값"]
+                                    st.caption(f"열: {last_yr}년 1~4분기 / {latest_label}")
+                                    q_rows = []
+                                    for metric in ["매출액", "영업이익", "당기순이익"]:
+                                        row = {"항목": metric}
+                                        for q in ["1분기", "2분기", "3분기", "4분기"]:
+                                            row[f"{last_yr} {q}"] = fmt_unit(q_map.get(q, {}).get(metric), unit)
+                                        row[latest_label] = fmt_unit(latest_vals.get(metric), unit)
+                                        q_rows.append(row)
+                                    st.dataframe(pd.DataFrame(q_rows), use_container_width=True, hide_index=True)
+                                    st.caption("4분기는 사업보고서(연간) 수치에서 3분기 누적을 뺀 값이라, 결산 조정 등으로 실제 공시치와 약간 다를 수 있습니다.")
+                                else:
+                                    st.caption("분기별 손익계산서 정보를 가져오지 못했습니다.")
 
 # ==============================================================
 # 페이지: 관리자 설정
