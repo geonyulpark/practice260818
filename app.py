@@ -938,6 +938,39 @@ def normalize_issuer_name(name):
     return aliases.get(s, s)
 
 
+def get_registered_standard_names() -> set:
+    """발행사별칭 표에 실제로 등록된 '표준명' 값들의 집합을 반환."""
+    df = load_issuer_aliases_full()
+    if df.empty or "표준명" not in df.columns:
+        return set()
+    return set(df["표준명"].dropna().astype(str).str.strip()) - {""}
+
+
+def resolve_standard_name(raw_name):
+    """원본 발행사명을 별칭 표 기준으로 정규화하고, 그 결과가 실제 별칭 표에 등록된 표준명인지 함께 반환.
+    반환값: (표준명, 등록여부 bool). raw_name이 비어있으면 (None, False)."""
+    norm = normalize_issuer_name(raw_name)
+    if norm is None:
+        return None, False
+    return norm, (norm in get_registered_standard_names())
+
+
+def show_unmatched_issuer_alert(names, source_label):
+    """이번에 업로드한 발행사명 중 별칭 표에 등록된 표준명이 없는 것들을 경고로 보여준다."""
+    registered = get_registered_standard_names()
+    unmatched = sorted({
+        normalize_issuer_name(n) for n in names
+        if pd.notna(n) and normalize_issuer_name(n) not in registered
+    })
+    if unmatched:
+        st.warning(
+            f"⚠️ {source_label}에서 발행사명 별칭 표에 등록된 표준명을 찾지 못한 발행사가 "
+            f"{len(unmatched)}건 있습니다. '관리자 설정 → 발행사명 별칭 관리'에서 등록해주세요:\n\n"
+            + ", ".join(unmatched[:30]) + (" ..." if len(unmatched) > 30 else "")
+        )
+    return unmatched
+
+
 NICE_OUTLOOK_MAP = {"S": "안정적", "P": "긍정적", "N": "부정적"}
 
 def split_rating_outlook(raw, source):
@@ -1188,6 +1221,8 @@ if page == "데이터 업로드":
                 st.stop()
             maturity_cols = info
             issuer_col = '발행사'
+
+            show_unmatched_issuer_alert(result[issuer_col].dropna().unique(), "인포맥스 파일")
 
             st.subheader("필터")
             col_bt, col0, col1, col2 = st.columns(4)
@@ -1511,6 +1546,8 @@ if page == "데이터 업로드":
             unified["충족여부"] = unified.apply(trigger_signal, axis=1)
             st.success(f"총 {len(unified)}개 트리거 항목을 통합했습니다 (신평사 {unified['신평사'].nunique()}개사).")
 
+            show_unmatched_issuer_alert(unified["원본발행사명"].dropna().unique(), "신용평가사 파일")
+
             date_summary = unified.groupby("신평사")["기준일"].first()
             st.caption("신평사별 인식된 기준일: " + ", ".join(f"{k} {v}" for k, v in date_summary.items()))
 
@@ -1528,11 +1565,15 @@ if page == "데이터 업로드":
 
             display_df = hit.copy()
             display_df["신평사"] = display_df["신평사"].map(RATER_ABBREV).fillna(display_df["신평사"])
-            display_df = display_df.rename(columns={"실제수치": actual_col_name})
+            display_df = display_df.rename(columns={"실제수치": actual_col_name, "발행사(정규화)": "표준명"})
+            _registered_names = get_registered_standard_names()
+            display_df["표준명"] = display_df["표준명"].apply(
+                lambda n: n if n in _registered_names else f"⚠️ {n} (별칭표 미등록)"
+            )
 
             st.dataframe(
                 display_df[[
-                    "원본발행사명", "발행사(정규화)", "신평사", "기준일", "등급", "등급전망",
+                    "표준명", "원본발행사명", "신평사", "기준일", "등급", "등급전망",
                     "지표명", actual_col_name, "충족여부",
                     "방향", "원문", "연산자", "값", "단위", "특이조건"
                 ]],
@@ -1616,6 +1657,7 @@ if page == "데이터 업로드":
                     st.error(winus_err)
                 else:
                     st.success(f"{len(winus_parsed)}개 발행사 익스포저를 확인했습니다.")
+                    show_unmatched_issuer_alert(winus_parsed["발행사명"].dropna().unique(), "위너스 파일")
                     st.dataframe(winus_parsed, use_container_width=True, hide_index=True, height=400)
                     winus_date = st.text_input(
                         "기준일자 (YYYYMMDD)",
@@ -1828,9 +1870,16 @@ elif page == "신용등급 트리거":
 
                 if "실제수치" in display_df.columns:
                     display_df = display_df.rename(columns={"실제수치": actual_col_name})
+                if "원본발행사명" in display_df.columns:
+                    # 저장 당시 얼어붙은 '발행사(정규화)' 값 대신, 지금 시점의 별칭 표 기준으로 다시 계산
+                    _registered_names = get_registered_standard_names()
+                    resolved = display_df["원본발행사명"].apply(normalize_issuer_name)
+                    display_df["표준명"] = resolved.apply(
+                        lambda n: n if (n and n in _registered_names) else (f"⚠️ {n} (별칭표 미등록)" if n else "-")
+                    )
 
                 show_cols = [c for c in
-                    ["원본발행사명", "발행사(정규화)", "신평사", "기준일", "등급", "등급전망",
+                    ["표준명", "원본발행사명", "신평사", "기준일", "등급", "등급전망",
                      "지표명", actual_col_name, "충족여부",
                      "방향", "원문", "연산자", "값", "단위", "특이조건"]
                     if c in display_df.columns]
