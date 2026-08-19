@@ -597,7 +597,7 @@ def fetch_financials(corp_code: str, api_key: str):
                 continue
             revenue = op_income = net_income = None
             for row in data.get("list", []):
-                if row.get("sj_div") != "IS":
+                if row.get("sj_div") not in ("IS", "CIS"):
                     continue
                 name = row.get("account_nm", "")
                 raw = (row.get("thstrm_amount") or "").replace(",", "")
@@ -1814,77 +1814,72 @@ elif page == "발행사별 상세보기":
                     if not DART_API_KEY:
                         st.caption("DART API 키가 설정되어 있지 않아 이 정보를 조회할 수 없습니다.")
                     else:
-                        show_dart = st.checkbox(
-                            "DART에서 기업개황·재무제표 조회 (최초 조회 시 몇 초 걸릴 수 있습니다)",
-                            key="detail_dart_checkbox"
-                        )
-                        if show_dart:
-                            # 1) corp_code 확보: 별칭 표에 저장된 법인고유번호를 우선 사용 (빠르고 정확함)
-                            corp_code = None
-                            alias_full_for_detail = load_issuer_aliases_full()
-                            if (
-                                not alias_full_for_detail.empty
-                                and "표준명" in alias_full_for_detail.columns
-                                and "법인고유번호" in alias_full_for_detail.columns
-                            ):
-                                match_row = alias_full_for_detail[alias_full_for_detail["표준명"] == norm_pick]
-                                if not match_row.empty:
-                                    stored_code = str(match_row.iloc[0]["법인고유번호"]).strip()
-                                    if stored_code:
-                                        corp_code = stored_code
+                        # 1) corp_code 확보: 별칭 표에 저장된 법인고유번호를 우선 사용 (빠르고 정확함)
+                        corp_code = None
+                        alias_full_for_detail = load_issuer_aliases_full()
+                        if (
+                            not alias_full_for_detail.empty
+                            and "표준명" in alias_full_for_detail.columns
+                            and "법인고유번호" in alias_full_for_detail.columns
+                        ):
+                            match_row = alias_full_for_detail[alias_full_for_detail["표준명"] == norm_pick]
+                            if not match_row.empty:
+                                stored_code = str(match_row.iloc[0]["법인고유번호"]).strip()
+                                if stored_code:
+                                    corp_code = stored_code
 
-                            # 2) 별칭 표에 없으면 DART 전체 목록에서 실시간 매칭
-                            if not corp_code:
-                                with st.spinner("DART에서 기업 코드를 찾는 중입니다..."):
-                                    corp_map = load_corp_code_map(DART_API_KEY)
-                                    corp_code = find_corp_code(pick_issuer, corp_map) or find_corp_code(norm_pick, corp_map)
+                        # 2) 별칭 표에 없으면 DART 전체 목록에서 실시간 매칭
+                        if not corp_code:
+                            with st.spinner("DART에서 기업 코드를 찾는 중입니다..."):
+                                corp_map = load_corp_code_map(DART_API_KEY)
+                                corp_code = find_corp_code(pick_issuer, corp_map) or find_corp_code(norm_pick, corp_map)
 
-                            if not corp_code:
-                                st.caption(
-                                    "DART에서 이 발행사의 기업 코드를 찾지 못했습니다. "
-                                    "관리자 탭에서 법인고유번호를 직접 등록해두시면 더 정확하게 찾을 수 있습니다."
-                                )
-                            else:
-                                with st.spinner("DART에서 기업개황·재무제표를 조회하는 중입니다..."):
-                                    overview = fetch_company_overview(corp_code, DART_API_KEY)
-                                    fin = fetch_financials(corp_code, DART_API_KEY)
+                        if not corp_code:
+                            st.caption(
+                                "DART에서 이 발행사의 기업 코드를 찾지 못했습니다. "
+                                "관리자 탭에서 법인고유번호를 직접 등록해두시면 더 정확하게 찾을 수 있습니다."
+                            )
+                        else:
+                            with st.spinner("DART에서 기업개황·재무제표를 조회하는 중입니다..."):
+                                overview = fetch_company_overview(corp_code, DART_API_KEY)
+                                fin = fetch_financials(corp_code, DART_API_KEY)
 
-                                col_ov, col_fin = st.columns(2)
-                                with col_ov:
-                                    st.caption("기업개황")
-                                    if overview:
-                                        overview_rows = [
-                                            ("대표자명", overview.get("ceo_nm")),
-                                            ("법인구분", overview.get("corp_cls")),
-                                            ("법인등록번호", overview.get("jurir_no")),
-                                            ("사업자등록번호", overview.get("bizr_no")),
-                                            ("주소", overview.get("adres")),
-                                            ("홈페이지", overview.get("hm_url")),
-                                            ("설립일", overview.get("est_dt")),
-                                            ("결산월", overview.get("acc_mt")),
-                                        ]
-                                        st.dataframe(
-                                            pd.DataFrame(overview_rows, columns=["항목", "값"]),
-                                            use_container_width=True, hide_index=True
-                                        )
-                                    else:
-                                        st.caption("기업개황 정보를 가져오지 못했습니다.")
+                            col_ov, col_fin = st.columns(2)
+                            with col_ov:
+                                st.caption("기업개황")
+                                if overview:
+                                    overview_rows = [
+                                        ("대표자명", overview.get("ceo_nm")),
+                                        ("법인구분", overview.get("corp_cls")),
+                                        ("법인등록번호", overview.get("jurir_no")),
+                                        ("사업자등록번호", overview.get("bizr_no")),
+                                        ("주소", overview.get("adres")),
+                                        ("홈페이지", overview.get("hm_url")),
+                                        ("설립일", overview.get("est_dt")),
+                                        ("결산월", overview.get("acc_mt")),
+                                    ]
+                                    st.dataframe(
+                                        pd.DataFrame(overview_rows, columns=["항목", "값"]),
+                                        use_container_width=True, hide_index=True
+                                    )
+                                else:
+                                    st.caption("기업개황 정보를 가져오지 못했습니다.")
 
-                                with col_fin:
-                                    st.caption("재무제표 (최근 공시 기준)")
-                                    if fin:
-                                        fin_rows = [
-                                            ("매출액", fin.get("매출액")),
-                                            ("영업이익", fin.get("영업이익")),
-                                            ("당기순이익", fin.get("당기순이익")),
-                                            ("기준", fin.get("재무제표기준일")),
-                                        ]
-                                        st.dataframe(
-                                            pd.DataFrame(fin_rows, columns=["항목", "값"]),
-                                            use_container_width=True, hide_index=True
-                                        )
-                                    else:
-                                        st.caption("재무제표 정보를 가져오지 못했습니다.")
+                            with col_fin:
+                                st.caption("재무제표 (최근 공시 기준)")
+                                if fin:
+                                    fin_rows = [
+                                        ("매출액", fin.get("매출액")),
+                                        ("영업이익", fin.get("영업이익")),
+                                        ("당기순이익", fin.get("당기순이익")),
+                                        ("기준", fin.get("재무제표기준일")),
+                                    ]
+                                    st.dataframe(
+                                        pd.DataFrame(fin_rows, columns=["항목", "값"]),
+                                        use_container_width=True, hide_index=True
+                                    )
+                                else:
+                                    st.caption("재무제표 정보를 가져오지 못했습니다.")
 
 # ==============================================================
 # 페이지: 관리자 설정
