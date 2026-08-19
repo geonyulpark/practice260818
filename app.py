@@ -11,46 +11,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Compass", layout="wide")
-
-# ---------------------------------------------------------------
-# Financial Times 스타일 테마 (연어색 배경 + 짙은 사이드바 + 세리프 헤딩)
-# ---------------------------------------------------------------
-st.markdown("""
-<style>
-.stApp { background-color: #FFF1E5; }
-[data-testid="stSidebar"] { background-color: #0D0D0D; }
-[data-testid="stSidebar"] * { color: #FFF1E5 !important; }
-[data-testid="stSidebar"] button {
-    background-color: transparent !important;
-    border: 1px solid rgba(255,241,229,0.25) !important;
-    color: #FFF1E5 !important;
-    text-align: left !important;
-    border-radius: 2px !important;
-    font-family: Georgia, 'Times New Roman', serif !important;
-    font-size: 0.92rem !important;
-    padding: 0.55rem 0.8rem !important;
-    box-shadow: none !important;
-}
-[data-testid="stSidebar"] button:hover {
-    background-color: rgba(255,241,229,0.10) !important;
-    border-color: #FFF1E5 !important;
-    color: #FFF1E5 !important;
-}
-[data-testid="stSidebar"] button[kind="primary"] {
-    background-color: #990F3D !important;
-    border-color: #990F3D !important;
-    color: #FFFFFF !important;
-    font-weight: 600 !important;
-}
-[data-testid="stSidebar"] button[kind="primary"]:hover {
-    background-color: #7a0c31 !important;
-    color: #FFFFFF !important;
-}
-[data-testid="stSidebar"] hr { border-color: rgba(255,241,229,0.2) !important; }
-h1, h2, h3 { font-family: Georgia, 'Times New Roman', serif !important; color: #0D0D0D !important; }
-</style>
-""", unsafe_allow_html=True)
-
 st.subheader("🧭 Compass")
 
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
@@ -65,7 +25,7 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
 with st.sidebar:
-    st.markdown("### 🧭 COMPASS")
+    st.markdown("### 🧭 Compass")
     st.markdown("---")
 
     for _p in NAV_VIEW_PAGES:
