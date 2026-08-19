@@ -1831,7 +1831,7 @@ elif page == "신용등급 트리거":
             "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
         )
     else:
-        col_a, col_b = st.columns([3, 1])
+        col_a, col_b, _col_spacer = st.columns([1, 1, 2])
         with col_a:
             q_date_obj = st.date_input(
                 "조회할 날짜", value=datetime.date.today(), format="YYYY-MM-DD", key="trigger_page_date"
@@ -1872,7 +1872,9 @@ elif page == "신용등급 트리거":
                         as_of_trigger["충족여부"] = as_of_trigger.apply(trigger_signal, axis=1)
 
                 st.subheader("발행사 검색")
-                search = st.text_input("표준명으로 검색 (부분 검색 가능)", key="trigger_page_search")
+                _search_col, _ = st.columns([1, 2])
+                with _search_col:
+                    search = st.text_input("표준명으로 검색 (부분 검색 가능)", key="trigger_page_search")
 
                 if search:
                     hit = as_of_trigger[as_of_trigger["표준명"].str.contains(search, na=False)]
@@ -1918,7 +1920,7 @@ elif page == "신용등급 트리거":
                     st.session_state["trigger_pick"] = None
 
                 if st.session_state.get("trigger_pick"):
-                    col_sel, col_clear = st.columns([4, 1])
+                    col_sel, col_clear, _col_spacer2 = st.columns([2, 1, 2])
                     with col_sel:
                         st.info(f"'{st.session_state['trigger_pick']}' 발행사로 목록이 좁혀져 있습니다.")
                     with col_clear:
