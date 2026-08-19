@@ -1256,21 +1256,33 @@ with tab3:
                 trigger_hist = pd.DataFrame()
                 winus_hist = pd.DataFrame()
 
-            # --- 그날의 채권 스프레드 ---
-            st.subheader(f"{query_date} 기준 채권 스프레드")
+            # --- 그날 기준 유효한(가장 최근 저장된) 채권 스프레드 ---
+            st.subheader(f"{query_date} 시점 기준 채권 스프레드")
             if spread_hist.empty or "업데이트일자" not in spread_hist.columns:
                 st.info("저장된 채권 스프레드 이력이 없습니다. 먼저 '채권 스프레드 대시보드' 탭에서 저장해주세요.")
                 day_spread = pd.DataFrame()
             else:
-                day_spread = spread_hist[spread_hist["업데이트일자"].astype(str) == query_date]
-                if day_spread.empty:
-                    available_dates = sorted(spread_hist["업데이트일자"].astype(str).unique())
+                sh_all = spread_hist.copy()
+                sh_all["업데이트일자"] = sh_all["업데이트일자"].astype(str)
+                sh_valid = sh_all[sh_all["업데이트일자"] <= query_date]
+                if sh_valid.empty:
+                    available_dates = sorted(sh_all["업데이트일자"].unique())
                     st.info(
-                        f"{query_date} 날짜의 저장된 데이터가 없습니다. "
+                        f"{query_date} 이전에 저장된 채권 스프레드 데이터가 없습니다. "
                         f"저장된 날짜: {', '.join(available_dates[-10:])}"
                         + (" ..." if len(available_dates) > 10 else "")
                     )
+                    day_spread = pd.DataFrame()
                 else:
+                    latest_spread_date = sh_valid["업데이트일자"].max()
+                    day_spread = sh_valid[sh_valid["업데이트일자"] == latest_spread_date]
+                    if latest_spread_date == query_date:
+                        st.caption(f"{query_date} 당일 데이터입니다. ({len(day_spread)}개 발행사)")
+                    else:
+                        st.info(
+                            f"{query_date} 날짜의 데이터가 없어, 그 이전 중 가장 최근인 "
+                            f"{latest_spread_date} 기준 데이터를 대신 보여드립니다. ({len(day_spread)}개 발행사)"
+                        )
                     st.dataframe(day_spread.drop(columns=["업데이트일자"]), use_container_width=True, hide_index=True)
 
             # --- 해당 시점 기준 최신 트리거 (신평사별로 기준일 <= query_date 중 최댓값) ---
@@ -1348,12 +1360,19 @@ with tab3:
                 if pick_issuer:
                     norm_pick = normalize_issuer_name(pick_issuer)
 
-                    st.markdown(f"**{pick_issuer} — 채권 스프레드 ({query_date})**")
                     if issuer_col_name and not day_spread.empty:
                         live_normalized_spread = day_spread[issuer_col_name].apply(normalize_issuer_name)
                         issuer_spread = day_spread[live_normalized_spread == norm_pick]
+                        spread_date_used = (
+                            day_spread["업데이트일자"].iloc[0] if "업데이트일자" in day_spread.columns and not day_spread.empty
+                            else query_date
+                        )
                     else:
                         issuer_spread = pd.DataFrame()
+                        spread_date_used = query_date
+
+                    date_note = "" if spread_date_used == query_date else f" — {spread_date_used} 기준(가장 가까운 이전 데이터)"
+                    st.markdown(f"**{pick_issuer} — 채권 스프레드{date_note}**")
                     if issuer_spread.empty:
                         st.caption("이 발행사에 대한 채권 스프레드 정보를 찾지 못했습니다 (그날 공모/무보증 채권이 없었을 수 있습니다).")
                     else:
