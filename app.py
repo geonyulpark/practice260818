@@ -971,9 +971,10 @@ def show_unmatched_issuer_alert(names, source_label):
     return unmatched
 
 
-def render_company_pills(names, key, other_key=None):
+def render_company_pills(names, key, other_key=None, format_func=None):
     """회사명 목록을 칩(pill) 형태로 조밀하게 나열하고, 선택된 회사명을 반환 (없으면 None).
-    other_key를 주면, 이 목록에서 선택했을 때 다른 목록(other_key)의 선택은 자동으로 해제된다."""
+    other_key를 주면, 이 목록에서 선택했을 때 다른 목록(other_key)의 선택은 자동으로 해제된다.
+    format_func을 주면 화면 표시 라벨만 바꾸고(예: '회사명 (익스포저)'), 반환값은 항상 원래 이름이다."""
     if not names:
         st.caption("해당 없음")
         return None
@@ -982,11 +983,33 @@ def render_company_pills(names, key, other_key=None):
         if other_key is not None:
             st.session_state[other_key] = None
 
+    kwargs = {}
+    if format_func is not None:
+        kwargs["format_func"] = format_func
+
     picked = st.pills(
         label="", options=list(names), selection_mode="single",
-        key=key, label_visibility="collapsed", on_change=_on_pick,
+        key=key, label_visibility="collapsed", on_change=_on_pick, **kwargs,
     )
     return picked
+
+
+def get_total_exposure(name, winus_latest):
+    """회사채잔액+CP잔액+CD잔액+RP잔액+정기예금잔액 합산 익스포저 금액. 데이터 없으면 None."""
+    if winus_latest is None or winus_latest.empty:
+        return None
+    match = winus_latest[winus_latest.get("표준명") == name]
+    if match.empty:
+        return None
+    m = match.iloc[0]
+    cols = ["회사채잔액", "CP잔액", "CD잔액", "RP잔액", "정기예금잔액"]
+    total, found_any = 0, False
+    for c in cols:
+        v = pd.to_numeric(m.get(c), errors="coerce")
+        if pd.notna(v):
+            total += v
+            found_any = True
+    return total if found_any else None
 
 
 NICE_OUTLOOK_MAP = {"S": "안정적", "P": "긍정적", "N": "부정적"}
@@ -1887,13 +1910,14 @@ elif page == "신용등급 트리거":
                             rows.append({
                                 "표준명": name, "충족건수": cnt,
                                 "검토의견": m.get("검토의견") or "-",
+                                "익스포저합계": get_total_exposure(name, winus_latest_for_trigger),
                                 "잔여한도": pd.to_numeric(m.get("잔여한도"), errors="coerce"),
                                 "투자한도": pd.to_numeric(m.get("투자한도"), errors="coerce"),
                                 "회사채잔액": pd.to_numeric(m.get("회사채잔액"), errors="coerce"),
                             })
                         else:
                             rows.append({"표준명": name, "충족건수": cnt, "검토의견": "-",
-                                          "잔여한도": None, "투자한도": None, "회사채잔액": None})
+                                          "익스포저합계": None, "잔여한도": None, "투자한도": None, "회사채잔액": None})
                     df = pd.DataFrame(rows)
                     if not df.empty:
                         df = df.sort_values("잔여한도", ascending=False, na_position="last")
@@ -1929,9 +1953,15 @@ elif page == "신용등급 트리거":
                 if "trigger_show_all_down" not in st.session_state:
                     st.session_state["trigger_show_all_down"] = False
 
+                def _pill_format(name):
+                    exp = get_total_exposure(name, winus_latest_for_trigger)
+                    return name if exp is None else f"{name} ({exp:,.0f}억원)"
+
                 st.markdown(f"**🟢 상향 조건 충족 ({len(up_companies_all)}개사, 충족 건수 많은 순)**")
                 up_list = up_companies_all if st.session_state["trigger_show_all_up"] else up_companies_all[:MAX_SHOW]
-                clicked_up = render_company_pills(up_list, key="trigger_up_pills", other_key="trigger_down_pills")
+                clicked_up = render_company_pills(
+                    up_list, key="trigger_up_pills", other_key="trigger_down_pills", format_func=_pill_format
+                )
                 if clicked_up:
                     st.session_state["trigger_pick"] = clicked_up
                 if len(up_companies_all) > MAX_SHOW and not st.session_state["trigger_show_all_up"]:
@@ -1943,7 +1973,9 @@ elif page == "신용등급 트리거":
 
                 st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies_all)}개사, 충족 건수 많은 순)**")
                 down_list = down_companies_all if st.session_state["trigger_show_all_down"] else down_companies_all[:MAX_SHOW]
-                clicked_down = render_company_pills(down_list, key="trigger_down_pills", other_key="trigger_up_pills")
+                clicked_down = render_company_pills(
+                    down_list, key="trigger_down_pills", other_key="trigger_up_pills", format_func=_pill_format
+                )
                 if clicked_down:
                     st.session_state["trigger_pick"] = clicked_down
                 if len(down_companies_all) > MAX_SHOW and not st.session_state["trigger_show_all_down"]:
