@@ -971,27 +971,35 @@ def show_unmatched_issuer_alert(names, source_label):
     return unmatched
 
 
-def render_company_buttons(names, key_prefix, format_func=None, highlight_func=None, per_row=4):
-    """회사명 목록을 버튼 그리드로 나열하고, 클릭된 회사명을 반환 (없으면 None).
-    highlight_func(name)이 True를 반환하면 그 버튼 전체가 강조된(primary) 스타일로 표시된다."""
+def render_company_pills(names, key, other_key=None, format_func=None):
+    """회사명 목록을 칩(pill) 형태로 조밀하게 나열하고, 선택된 회사명을 반환 (없으면 None).
+    other_key를 주면, 이 목록에서 선택했을 때 다른 목록(other_key)의 선택은 자동으로 해제된다.
+    format_func을 주면 화면 표시 라벨만 바꾸고, 반환값은 항상 원래 이름이다."""
     if not names:
         st.caption("해당 없음")
         return None
-    clicked = None
-    names = list(names)
-    for i in range(0, len(names), per_row):
-        chunk = names[i:i + per_row]
-        cols = st.columns(len(chunk))
-        for col, name in zip(cols, chunk):
-            with col:
-                label = format_func(name) if format_func else name
-                is_highlight = highlight_func(name) if highlight_func else False
-                if st.button(
-                    label, key=f"{key_prefix}_{i}_{name}", use_container_width=True,
-                    type="primary" if is_highlight else "secondary",
-                ):
-                    clicked = name
-    return clicked
+
+    def _on_pick():
+        if other_key is not None:
+            st.session_state[other_key] = None
+
+    kwargs = {}
+    if format_func is not None:
+        kwargs["format_func"] = format_func
+
+    picked = st.pills(
+        label="", options=list(names), selection_mode="single",
+        key=key, label_visibility="collapsed", on_change=_on_pick, **kwargs,
+    )
+    return picked
+
+
+_BOLD_DIGIT_MAP = str.maketrans("0123456789", "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵")
+
+def to_bold_digits(text: str) -> str:
+    """숫자만 유니코드 볼드체(Sans-Serif Bold)로 바꾼다. pills는 부분 굵게/배경색을 지원하지 않아,
+    금액 부분만이라도 시각적으로 도드라지게 하기 위한 대체 수단."""
+    return text.translate(_BOLD_DIGIT_MAP)
 
 
 def get_total_exposure(name, winus_latest):
@@ -1957,16 +1965,16 @@ elif page == "신용등급 트리거":
 
                 def _pill_format(name):
                     exp = get_total_exposure(name, winus_latest_for_trigger)
-                    return name if exp is None else f"{name} · {exp:,.0f}억원"
-
-                def _has_exposure(name):
-                    return get_total_exposure(name, winus_latest_for_trigger) is not None
+                    if exp is None:
+                        return name
+                    bold_amount = to_bold_digits(f"{exp:,.0f}")
+                    return f"{name} · {bold_amount}억원"
 
                 st.markdown(f"**🟢 상향 조건 충족 ({len(up_companies_all)}개사, 충족 건수 많은 순)**")
-                st.caption("음영 표시된 버튼 = 위너스 익스포저 데이터가 있는 발행사")
+                st.caption("굵은 숫자 = 위너스 익스포저 데이터가 있는 발행사")
                 up_list = up_companies_all if st.session_state["trigger_show_all_up"] else up_companies_all[:MAX_SHOW]
-                clicked_up = render_company_buttons(
-                    up_list, key_prefix="up", format_func=_pill_format, highlight_func=_has_exposure
+                clicked_up = render_company_pills(
+                    up_list, key="trigger_up_pills", other_key="trigger_down_pills", format_func=_pill_format
                 )
                 if clicked_up:
                     st.session_state["trigger_pick"] = clicked_up
@@ -1978,10 +1986,10 @@ elif page == "신용등급 트리거":
                     st.dataframe(build_exposure_table(up_counts), use_container_width=True, hide_index=True)
 
                 st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies_all)}개사, 충족 건수 많은 순)**")
-                st.caption("음영 표시된 버튼 = 위너스 익스포저 데이터가 있는 발행사")
+                st.caption("굵은 숫자 = 위너스 익스포저 데이터가 있는 발행사")
                 down_list = down_companies_all if st.session_state["trigger_show_all_down"] else down_companies_all[:MAX_SHOW]
-                clicked_down = render_company_buttons(
-                    down_list, key_prefix="down", format_func=_pill_format, highlight_func=_has_exposure
+                clicked_down = render_company_pills(
+                    down_list, key="trigger_down_pills", other_key="trigger_up_pills", format_func=_pill_format
                 )
                 if clicked_down:
                     st.session_state["trigger_pick"] = clicked_down
