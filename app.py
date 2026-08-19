@@ -690,8 +690,19 @@ with tab1:
     }
     MATURITY_COLS_WANTED = ["3M", "6M", "9M", "1Y", "3Y", "5Y"]
 
+    BOND_CATEGORIES = ["공모/무보증", "은행채", "카드채", "기타금융채"]
+
+    def _split_category_grade(raw):
+        """'은행채 AA+' -> ('은행채', 'AA+') 처럼 앞의 카테고리 표기와 등급을 분리."""
+        text = str(raw).strip()
+        for cat in BOND_CATEGORIES:
+            if text.startswith(cat):
+                return cat, text[len(cat):].strip()
+        return None, text
+
     def parse_infomax_bond_file(file_obj):
-        """인포맥스 채권 수익률 엑셀 → (정제된 result df, 사용된 만기 열 목록). 실패 시 (None, 오류메시지)."""
+        """인포맥스 채권 수익률 엑셀 → (정제된 result df, 사용된 만기 열 목록). 실패 시 (None, 오류메시지).
+        공모/무보증, 은행채, 카드채, 기타금융채 네 종류만 추출한다."""
         try:
             df = pd.read_excel(file_obj, header=2)
         except Exception as e:
@@ -702,7 +713,9 @@ with tab1:
         if rating_col not in df.columns or issuer_col not in df.columns:
             return None, "예상한 열 구조와 다릅니다. 파일 형식을 확인해주세요."
 
-        mask_rating = df[rating_col].astype(str).str.contains("공모/무보증", na=False)
+        mask_rating = df[rating_col].astype(str).str.strip().apply(
+            lambda x: any(str(x).startswith(cat) for cat in BOND_CATEGORIES)
+        )
         filtered = df[mask_rating].copy()
         filtered = filtered[filtered[issuer_col] != filtered[rating_col]]
 
@@ -718,9 +731,11 @@ with tab1:
         result = filtered[display_cols].rename(
             columns={rating_col: "신용등급그룹", industry_col: "업종구분", industry_code_col: "업종코드"}
         )
-        result["신용등급그룹"] = (
-            result["신용등급그룹"].astype(str).str.replace("공모/무보증", "", regex=False).str.strip()
-        )
+
+        cat_grade = result["신용등급그룹"].apply(_split_category_grade)
+        result.insert(0, "채권종류", [c for c, g in cat_grade])
+        result["신용등급그룹"] = [g for c, g in cat_grade]
+
         result["업종구분"] = result["업종구분"].fillna("미분류")
 
         if "업종코드" in result.columns:
@@ -787,24 +802,36 @@ with tab1:
         issuer_col = '발행사'
 
         st.subheader("필터")
-        col0, col1, col2 = st.columns(3)
+        col_bt, col0, col1, col2 = st.columns(4)
+
+        with col_bt:
+            bond_type_options = sorted(result["채권종류"].dropna().unique())
+            selected_bond_types = st.multiselect(
+                "채권종류 선택", options=bond_type_options, default=bond_type_options
+            )
 
         with col0:
-            industry_options = sorted(result["산업대분류"].unique())
+            industry_options = sorted(
+                result[result["채권종류"].isin(selected_bond_types)]["산업대분류"].unique()
+            )
             selected_industries = st.multiselect(
                 "산업 대분류 선택", options=industry_options, default=industry_options
             )
 
         with col1:
             rating_options = sorted(
-                result[result["산업대분류"].isin(selected_industries)]["신용등급그룹"].unique()
+                result[
+                    result["채권종류"].isin(selected_bond_types)
+                    & result["산업대분류"].isin(selected_industries)
+                ]["신용등급그룹"].unique()
             )
             selected_ratings = st.multiselect(
                 "신용등급 선택", options=rating_options, default=rating_options
             )
 
         issuer_pool = result[
-            result["산업대분류"].isin(selected_industries)
+            result["채권종류"].isin(selected_bond_types)
+            & result["산업대분류"].isin(selected_industries)
             & result["신용등급그룹"].isin(selected_ratings)
         ][issuer_col].sort_values().unique()
 
@@ -814,7 +841,8 @@ with tab1:
             )
 
         view = result[
-            result["산업대분류"].isin(selected_industries)
+            result["채권종류"].isin(selected_bond_types)
+            & result["산업대분류"].isin(selected_industries)
             & result["신용등급그룹"].isin(selected_ratings)
         ]
         if selected_issuers:
@@ -857,19 +885,24 @@ with tab1:
         st.dataframe(view, use_container_width=True, hide_index=True)
 
         st.subheader("신용등급별 발행사 수")
-        st.bar_chart(view["신용등급그룹"].value_counts())
+        st.bar_chart(view.groupby(["채권종류", "신용등급그룹"]).size().rename("발행사 수"))
 
         if maturity_cols:
-            st.subheader("등급별 만기별 평균 수익률")
+            st.subheader("등급별 만기별 평균 수익률 (채권종류별)")
+            st.caption("은행채·카드채·기타금융채·공모무보증은 같은 등급이라도 스프레드 수준이 달라 채권종류별로 따로 계산합니다.")
             rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
                              "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-"]
-            avg_by_rating = result.groupby("신용등급그룹")[maturity_cols].mean().round(3)
-            ordered = [r for r in rating_order if r in avg_by_rating.index]
-            remaining = [r for r in avg_by_rating.index if r not in rating_order]
-            avg_by_rating = avg_by_rating.loc[ordered + remaining]
-            st.dataframe(avg_by_rating, use_container_width=True)
-            st.caption("등급별 만기 수익률 곡선 (평균)")
-            st.line_chart(avg_by_rating.T)
+            for bond_type in [c for c in bond_type_options if c in view["채권종류"].unique()]:
+                subset = view[view["채권종류"] == bond_type]
+                if subset.empty:
+                    continue
+                avg_by_rating = subset.groupby("신용등급그룹")[maturity_cols].mean().round(3)
+                ordered = [r for r in rating_order if r in avg_by_rating.index]
+                remaining = [r for r in avg_by_rating.index if r not in rating_order]
+                avg_by_rating = avg_by_rating.loc[ordered + remaining]
+                st.markdown(f"**{bond_type}**")
+                st.dataframe(avg_by_rating, use_container_width=True)
+                st.line_chart(avg_by_rating.T)
 
         if maturity_cols:
             st.subheader("발행사별 만기 수익률 비교")
