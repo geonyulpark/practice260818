@@ -556,6 +556,48 @@ def trigger_signal(row):
     return "🟢" if row.get("방향") == "상향" else "🔴"
 
 
+def _norm_col(c):
+    """엑셀 헤더에 섞인 줄바꿈/공백을 제거해서 비교하기 쉽게 만든다."""
+    return re.sub(r"\s+", "", str(c))
+
+
+WINUS_COL_MAP = {
+    "투자회사명": "발행사명",
+    "검토의견": "검토의견",
+    "내부등급코드": "내부등급",
+    "(투자한도)회사채등": "투자한도",
+    "(잔여한도)회사채등": "잔여한도",
+    "(투자현황)회사채": "회사채잔액",
+    "(투자현황)CP": "CP잔액",
+    "(투자현황)CD": "CD잔액",
+    "(투자현황)RP": "RP잔액",
+    "(투자현황)정기예금": "정기예금잔액",
+}
+
+
+def parse_winus_file(file_obj):
+    """위너스(WINUS) '유니버스조회' 엑셀에서 익스포저 관련 열만 뽑아 정제.
+    반환: (정제된 DataFrame, 오류메시지). 성공 시 오류메시지는 None."""
+    try:
+        df = pd.read_excel(file_obj, sheet_name=0, header=0)
+    except Exception as e:
+        return None, f"파일을 읽는 중 오류가 발생했습니다: {e}"
+
+    norm_to_orig = {_norm_col(c): c for c in df.columns}
+    selected, missing = {}, []
+    for key, friendly in WINUS_COL_MAP.items():
+        if key in norm_to_orig:
+            selected[friendly] = df[norm_to_orig[key]]
+        else:
+            missing.append(key)
+    if missing:
+        return None, f"예상한 열을 찾을 수 없습니다: {missing}"
+
+    result = pd.DataFrame(selected)
+    result = result[result["발행사명"].notna()].reset_index(drop=True)
+    return result, None
+
+
 # ==============================================================
 # TAB 1: 채권 스프레드 대시보드 (기존 기능)
 # ==============================================================
@@ -1151,7 +1193,7 @@ with tab2:
 with tab3:
     st.caption(
         "특정 날짜를 기준으로, 그날의 채권 스프레드와 그 시점에 유효했던(가장 최근 발표된) "
-        "신용등급 변동 트리거를 함께 보여줍니다. 두 이력 모두 Google Sheets에 미리 저장되어 있어야 합니다."
+        "신용등급 변동 트리거·위너스 익스포저를 함께 보여줍니다. 이력은 Google Sheets에 미리 저장되어 있어야 합니다."
     )
 
     if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
@@ -1160,6 +1202,33 @@ with tab3:
             "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
         )
     else:
+        with st.expander("위너스(WINUS) 익스포저 업로드"):
+            st.caption("'유니버스조회' 엑셀을 업로드하면 발행사별 익스포저(투자한도·잔여한도·잔액)를 이력에 저장합니다.")
+            winus_file = st.file_uploader("위너스 유니버스조회 엑셀 업로드", type=["xlsx"], key="winus_upload")
+            if winus_file is not None:
+                winus_parsed, winus_err = parse_winus_file(winus_file)
+                if winus_err:
+                    st.error(winus_err)
+                else:
+                    st.success(f"{len(winus_parsed)}개 발행사 익스포저를 확인했습니다.")
+                    st.dataframe(winus_parsed.head(10), use_container_width=True, hide_index=True)
+                    winus_date = st.text_input(
+                        "기준일자 (YYYYMMDD)",
+                        value=extract_date_from_filename(winus_file.name),
+                        key="winus_date_input"
+                    )
+                    if st.button("위너스 이력에 저장", key="save_winus_history_btn"):
+                        if not re.fullmatch(r"20\d{6}", winus_date or ""):
+                            st.error("기준일자는 YYYYMMDD 8자리 숫자로 입력해주세요.")
+                        else:
+                            try:
+                                with st.spinner("Google Sheets에 저장하는 중입니다..."):
+                                    append_history(winus_parsed, "위너스_이력", winus_date)
+                                read_history.clear()
+                                st.success(f"{winus_date} 기준 {len(winus_parsed)}건을 이력에 저장했습니다.")
+                            except Exception as e:
+                                st.error(f"저장 중 오류가 발생했습니다: {e}")
+
         col_a, col_b = st.columns([3, 1])
         with col_a:
             query_date_obj = st.date_input(
@@ -1180,10 +1249,12 @@ with tab3:
                 with st.spinner("이력을 불러오는 중입니다..."):
                     spread_hist = read_history("채권스프레드_이력")
                     trigger_hist = read_history("신용등급트리거_이력")
+                    winus_hist = read_history("위너스_이력")
             except Exception as e:
                 st.error(f"이력을 불러오는 중 오류가 발생했습니다: {e}")
                 spread_hist = pd.DataFrame()
                 trigger_hist = pd.DataFrame()
+                winus_hist = pd.DataFrame()
 
             # --- 그날의 채권 스프레드 ---
             st.subheader(f"{query_date} 기준 채권 스프레드")
@@ -1225,6 +1296,19 @@ with tab3:
                         lambda row: row["기준일"] == latest_by_rater[row["신평사"]], axis=1
                     )
                     as_of_trigger = th_valid[keep_mask]
+
+            # --- 해당 시점 기준 최신 위너스 익스포저 (query_date 이하 중 가장 최근 날짜) ---
+            if winus_hist.empty or "업데이트일자" not in winus_hist.columns:
+                as_of_winus = pd.DataFrame()
+            else:
+                wh = winus_hist.copy()
+                wh["업데이트일자"] = wh["업데이트일자"].astype(str)
+                wh_valid = wh[wh["업데이트일자"] <= query_date]
+                if wh_valid.empty:
+                    as_of_winus = pd.DataFrame()
+                else:
+                    latest_winus_date = wh_valid["업데이트일자"].max()
+                    as_of_winus = wh_valid[wh_valid["업데이트일자"] == latest_winus_date]
 
             # --- 발행사 선택해서 둘을 한 화면에 ---
             if not day_spread.empty:
@@ -1274,6 +1358,23 @@ with tab3:
                                     if c in it.columns]
                                 st.dataframe(
                                     it[display_cols],
+                                    use_container_width=True, hide_index=True
+                                )
+
+                        if not as_of_winus.empty and "발행사명" in as_of_winus.columns:
+                            norm_pick2 = normalize_issuer_name(pick_issuer)
+                            live_normalized_winus = as_of_winus["발행사명"].apply(normalize_issuer_name)
+                            issuer_winus = as_of_winus[live_normalized_winus == norm_pick2]
+                            st.markdown(f"**{pick_issuer} — 익스포저 현황 (해당 시점 기준)**")
+                            if issuer_winus.empty:
+                                st.caption("이 발행사에 대한 위너스 익스포저 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
+                            else:
+                                winus_cols = [c for c in
+                                    ["검토의견", "내부등급", "투자한도", "잔여한도",
+                                     "회사채잔액", "CP잔액", "CD잔액", "RP잔액", "정기예금잔액"]
+                                    if c in issuer_winus.columns]
+                                st.dataframe(
+                                    issuer_winus[winus_cols],
                                     use_container_width=True, hide_index=True
                                 )
 
