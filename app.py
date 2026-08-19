@@ -971,6 +971,22 @@ def show_unmatched_issuer_alert(names, source_label):
     return unmatched
 
 
+def render_clickable_company_row(names, key_prefix, per_row=6):
+    """회사명 목록을 여러 열로 나눠 가로로 나열하고, 클릭된 회사명을 반환 (없으면 None)."""
+    if not names:
+        return None
+    clicked = None
+    names = list(names)
+    for i in range(0, len(names), per_row):
+        chunk = names[i:i + per_row]
+        cols = st.columns(len(chunk))
+        for col, name in zip(cols, chunk):
+            with col:
+                if st.button(name, key=f"{key_prefix}_{i}_{name}", use_container_width=True):
+                    clicked = name
+    return clicked
+
+
 NICE_OUTLOOK_MAP = {"S": "안정적", "P": "긍정적", "N": "부정적"}
 
 def split_rating_outlook(raw, source):
@@ -1845,15 +1861,50 @@ elif page == "신용등급 트리거":
                 keep_mask = th_valid.apply(
                     lambda row: row["기준일"] == latest_by_rater[row["신평사"]], axis=1
                 )
-                as_of_trigger = th_valid[keep_mask]
+                as_of_trigger = th_valid[keep_mask].copy()
+
+                # 표준명(라이브 재계산)과 충족여부를 검색·목록 구성 전에 미리 확보
+                as_of_trigger["표준명"] = as_of_trigger["원본발행사명"].apply(normalize_issuer_name)
+                if "충족여부" not in as_of_trigger.columns or as_of_trigger["충족여부"].isna().all():
+                    if {"실제수치", "연산자", "값", "방향"} <= set(as_of_trigger.columns):
+                        as_of_trigger["충족여부"] = as_of_trigger.apply(trigger_signal, axis=1)
 
                 st.subheader("발행사 검색")
-                search = st.text_input("발행사명 입력 (부분 검색 가능)", key="trigger_page_search")
+                search = st.text_input("표준명으로 검색 (부분 검색 가능)", key="trigger_page_search")
 
-                if search and "발행사(정규화)" in as_of_trigger.columns:
-                    hit = as_of_trigger[as_of_trigger["발행사(정규화)"].str.contains(search, na=False)]
+                if search:
+                    hit = as_of_trigger[as_of_trigger["표준명"].str.contains(search, na=False)]
+                    st.session_state["trigger_pick"] = None  # 검색어를 바꾸면 개별 선택은 해제
                 else:
                     hit = as_of_trigger
+
+                # --- 상향/하향 조건 충족 기업을 가로로 나열, 클릭하면 아래 목록이 그 기업으로 좁혀짐 ---
+                up_companies = sorted(hit[hit.get("충족여부") == "🟢"]["표준명"].dropna().unique())
+                down_companies = sorted(hit[hit.get("충족여부") == "🔴"]["표준명"].dropna().unique())
+
+                st.markdown(f"**🟢 상향 조건 충족 ({len(up_companies)}개사)**")
+                clicked_up = render_clickable_company_row(up_companies, key_prefix="up")
+                if clicked_up:
+                    st.session_state["trigger_pick"] = clicked_up
+
+                st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies)}개사)**")
+                clicked_down = render_clickable_company_row(down_companies, key_prefix="down")
+                if clicked_down:
+                    st.session_state["trigger_pick"] = clicked_down
+
+                # 선택된 회사가 지금 목록에 더 이상 없으면(검색어 변경 등) 선택 해제
+                if st.session_state.get("trigger_pick") and st.session_state["trigger_pick"] not in set(hit["표준명"].dropna()):
+                    st.session_state["trigger_pick"] = None
+
+                if st.session_state.get("trigger_pick"):
+                    col_sel, col_clear = st.columns([4, 1])
+                    with col_sel:
+                        st.info(f"'{st.session_state['trigger_pick']}' 발행사로 목록이 좁혀져 있습니다.")
+                    with col_clear:
+                        if st.button("선택 해제", key="trigger_pick_clear"):
+                            st.session_state["trigger_pick"] = None
+                            st.rerun()
+                    hit = hit[hit["표준명"] == st.session_state["trigger_pick"]]
 
                 display_df = hit.copy()
                 if "신평사" in display_df.columns:
@@ -1865,18 +1916,13 @@ elif page == "신용등급 트리거":
                     if len(labels) > 0:
                         actual_col_name = f"실제 수치({labels[0]})"
 
-                if "충족여부" not in display_df.columns and {"실제수치", "연산자", "값", "방향"} <= set(display_df.columns):
-                    display_df["충족여부"] = display_df.apply(trigger_signal, axis=1)
-
                 if "실제수치" in display_df.columns:
                     display_df = display_df.rename(columns={"실제수치": actual_col_name})
-                if "원본발행사명" in display_df.columns:
-                    # 저장 당시 얼어붙은 '발행사(정규화)' 값 대신, 지금 시점의 별칭 표 기준으로 다시 계산
-                    _registered_names = get_registered_standard_names()
-                    resolved = display_df["원본발행사명"].apply(normalize_issuer_name)
-                    display_df["표준명"] = resolved.apply(
-                        lambda n: n if (n and n in _registered_names) else (f"⚠️ {n} (별칭표 미등록)" if n else "-")
-                    )
+
+                _registered_names = get_registered_standard_names()
+                display_df["표준명"] = display_df["표준명"].apply(
+                    lambda n: n if (n and n in _registered_names) else (f"⚠️ {n} (별칭표 미등록)" if n else "-")
+                )
 
                 show_cols = [c for c in
                     ["표준명", "원본발행사명", "신평사", "기준일", "등급", "등급전망",
@@ -1887,9 +1933,9 @@ elif page == "신용등급 트리거":
                 st.subheader(f"트리거 목록 ({len(display_df)}건)")
                 st.dataframe(display_df[show_cols], use_container_width=True, hide_index=True, height=400)
 
-                if search and "발행사(정규화)" in hit.columns:
-                    matched_names = sorted(hit["발행사(정규화)"].dropna().unique())
-                    rater_count = hit.groupby("발행사(정규화)")["신평사"].nunique()
+                if search:
+                    matched_names = sorted(hit["표준명"].dropna().unique())
+                    rater_count = hit.groupby("표준명")["신평사"].nunique()
                     st.caption(
                         f"검색된 발행사: {', '.join(matched_names[:10])}"
                         + (" ..." if len(matched_names) > 10 else "")
