@@ -11,6 +11,46 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Compass", layout="wide")
+
+# ---------------------------------------------------------------
+# Financial Times 스타일 테마 (연어색 배경 + 짙은 사이드바 + 세리프 헤딩)
+# ---------------------------------------------------------------
+st.markdown("""
+<style>
+.stApp { background-color: #FFF1E5; }
+[data-testid="stSidebar"] { background-color: #0D0D0D; }
+[data-testid="stSidebar"] * { color: #FFF1E5 !important; }
+[data-testid="stSidebar"] button {
+    background-color: transparent !important;
+    border: 1px solid rgba(255,241,229,0.25) !important;
+    color: #FFF1E5 !important;
+    text-align: left !important;
+    border-radius: 2px !important;
+    font-family: Georgia, 'Times New Roman', serif !important;
+    font-size: 0.92rem !important;
+    padding: 0.55rem 0.8rem !important;
+    box-shadow: none !important;
+}
+[data-testid="stSidebar"] button:hover {
+    background-color: rgba(255,241,229,0.10) !important;
+    border-color: #FFF1E5 !important;
+    color: #FFF1E5 !important;
+}
+[data-testid="stSidebar"] button[kind="primary"] {
+    background-color: #990F3D !important;
+    border-color: #990F3D !important;
+    color: #FFFFFF !important;
+    font-weight: 600 !important;
+}
+[data-testid="stSidebar"] button[kind="primary"]:hover {
+    background-color: #7a0c31 !important;
+    color: #FFFFFF !important;
+}
+[data-testid="stSidebar"] hr { border-color: rgba(255,241,229,0.2) !important; }
+h1, h2, h3 { font-family: Georgia, 'Times New Roman', serif !important; color: #0D0D0D !important; }
+</style>
+""", unsafe_allow_html=True)
+
 st.subheader("🧭 Compass")
 
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
@@ -21,23 +61,45 @@ NAV_ADMIN_PAGES = ["데이터 업로드", "관리자 설정"]
 
 if "nav_page" not in st.session_state:
     st.session_state.nav_page = NAV_VIEW_PAGES[0]
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
 
 with st.sidebar:
-    st.markdown("### 🧭 Compass")
+    st.markdown("### 🧭 COMPASS")
     st.markdown("---")
-    st.markdown("**조회**")
+
     for _p in NAV_VIEW_PAGES:
         if st.button(_p, key=f"nav_btn_{_p}", use_container_width=True,
                      type="primary" if st.session_state.nav_page == _p else "secondary"):
             st.session_state.nav_page = _p
             st.rerun()
+
     st.markdown("---")
-    st.markdown("**관리**")
-    for _p in NAV_ADMIN_PAGES:
-        if st.button(_p, key=f"nav_btn_{_p}", use_container_width=True,
-                     type="primary" if st.session_state.nav_page == _p else "secondary"):
-            st.session_state.nav_page = _p
+
+    if st.session_state.is_admin:
+        for _p in NAV_ADMIN_PAGES:
+            if st.button(_p, key=f"nav_btn_{_p}", use_container_width=True,
+                         type="primary" if st.session_state.nav_page == _p else "secondary"):
+                st.session_state.nav_page = _p
+                st.rerun()
+        st.markdown("---")
+        if st.button("로그아웃", key="admin_logout_btn", use_container_width=True):
+            st.session_state.is_admin = False
+            if st.session_state.nav_page in NAV_ADMIN_PAGES:
+                st.session_state.nav_page = NAV_VIEW_PAGES[0]
             st.rerun()
+    else:
+        with st.expander("관리자 로그인"):
+            _admin_pw_secret = st.secrets.get("ADMIN_PASSWORD", "")
+            _pw_input = st.text_input("비밀번호", type="password", key="sidebar_admin_pw")
+            if st.button("로그인", key="admin_login_btn", use_container_width=True):
+                if not _admin_pw_secret:
+                    st.error("관리자 비밀번호가 설정되어 있지 않습니다.")
+                elif _pw_input == _admin_pw_secret:
+                    st.session_state.is_admin = True
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 올바르지 않습니다.")
 
 page = st.session_state.nav_page
 
@@ -1032,6 +1094,9 @@ def parse_winus_file(file_obj):
 # 페이지: 데이터 업로드
 # ==============================================================
 if page == "데이터 업로드":
+    if not st.session_state.get("is_admin"):
+        st.warning("관리자 로그인이 필요합니다. 왼쪽 사이드바에서 로그인해주세요.")
+        st.stop()
     st.header("데이터 업로드")
     upload_tab1, upload_tab2, upload_tab3 = st.tabs(
         ["인포맥스 채권 스프레드", "신용평가사 트리거", "위너스 익스포저"]
@@ -2279,359 +2344,345 @@ elif page == "발행사별 상세보기":
 # 페이지: 관리자 설정
 # ==============================================================
 elif page == "관리자 설정":
+    if not st.session_state.get("is_admin"):
+        st.warning("관리자 로그인이 필요합니다. 왼쪽 사이드바에서 로그인해주세요.")
+        st.stop()
     st.header("관리자 설정")
-    st.caption("이 탭은 발행사명 별칭 등 대시보드의 공용 설정을 관리하는 곳입니다. 비밀번호가 필요합니다.")
+    st.caption("발행사명 별칭 등 대시보드의 공용 설정을 관리하는 곳입니다.")
 
-    ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "")
-
-    if not ADMIN_PASSWORD:
-        st.warning(
-            "관리자 비밀번호가 설정되어 있지 않습니다. "
-            "Streamlit Cloud Secrets에 ADMIN_PASSWORD = \"원하는비밀번호\" 를 등록해주세요."
-        )
+    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+        st.warning("Google Sheets 연동 정보가 설정되어 있지 않아 별칭 관리를 사용할 수 없습니다.")
     else:
-        pw_input = st.text_input("관리자 비밀번호", type="password", key="admin_pw")
+        st.subheader("발행사명 별칭 관리")
+        st.caption(
+            "회사 하나가 한 행, 각 소스(인포맥스·한신평·나신평·한기평·위너스·DART)가 각각 열입니다. "
+            "여기서 수정한 내용은 Google Sheets에 즉시 저장되며, 모든 사용자의 대시보드에 바로 반영됩니다."
+        )
 
-        if pw_input == "":
-            st.info("비밀번호를 입력하면 관리자 설정이 열립니다.")
-        elif pw_input != ADMIN_PASSWORD:
-            st.error("비밀번호가 올바르지 않습니다.")
+        alias_full_df = load_issuer_aliases_full()
+
+        search_canon = st.text_input(
+            "표준명으로 검색", key="alias_search_canon"
+        )
+        view_df = alias_full_df
+        if search_canon and not alias_full_df.empty and "표준명" in alias_full_df.columns:
+            view_df = alias_full_df[alias_full_df["표준명"].str.contains(search_canon, na=False)]
+
+        if not view_df.empty:
+            st.dataframe(view_df, use_container_width=True, hide_index=True)
         else:
-            st.success("관리자 모드가 열렸습니다.")
+            st.caption("등록된 별칭이 아직 없습니다." if alias_full_df.empty else "검색 결과가 없습니다.")
 
-            if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
-                st.warning("Google Sheets 연동 정보가 설정되어 있지 않아 별칭 관리를 사용할 수 없습니다.")
+        # ------------------------------------------------------------
+        # 엑셀로 다운로드 / 엑셀 업로드로 일괄 저장
+        # ------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("**엑셀로 내려받아 수정 후 일괄 반영**")
+        col_dl, col_ul = st.columns(2)
+
+        with col_dl:
+            st.caption("현재 별칭 표를 엑셀로 내려받습니다.")
+            excel_bytes = build_alias_excel_bytes(
+                alias_full_df if not alias_full_df.empty else pd.DataFrame(columns=ALIAS_HEADER)
+            )
+            st.download_button(
+                "발행사별칭.xlsx 다운로드",
+                data=excel_bytes,
+                file_name="발행사별칭.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="alias_excel_download"
+            )
+
+        with col_ul:
+            st.caption("엑셀에서 수정한 파일을 업로드하면, 시트 전체를 이 내용으로 덮어씁니다.")
+            alias_upload = st.file_uploader(
+                "수정한 발행사별칭.xlsx 업로드", type=["xlsx"], key="alias_excel_upload"
+            )
+            if alias_upload is not None:
+                if st.button("업로드한 내용으로 전체 저장", key="alias_excel_save_btn"):
+                    try:
+                        uploaded_df = pd.read_excel(alias_upload)
+                        save_alias_excel_upload(uploaded_df)
+                        st.success(f"{len(uploaded_df)}개 회사 정보로 별칭 표를 갱신했습니다.")
+
+                        verify_df = load_issuer_aliases_full()
+                        if len(verify_df) == len(uploaded_df):
+                            st.info(f"✅ 저장 직후 재확인: 클라우드 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
+                        else:
+                            st.error(
+                                f"⚠️ 재확인해보니 {len(verify_df)}행이 조회됩니다 (기대값 {len(uploaded_df)}행). "
+                                "GOOGLE_SHEET_ID 설정을 확인해주세요."
+                            )
+                    except Exception as e:
+                        st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+        st.warning(
+            "⚠️ 엑셀 업로드는 시트 **전체를 덮어씁니다**. 다운로드한 최신 파일을 기준으로 수정해서 "
+            "올려주세요 (다른 사람이 그 사이에 추가한 내용이 있다면 먼저 새로 다운로드하고 반영해서 병합하세요)."
+        )
+
+        # ------------------------------------------------------------
+        # 별칭 표 검증
+        # ------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("별칭 표 검증")
+        st.caption(
+            "표준명이 중복된 행, 같은 표기가 서로 다른 표준명에 잘못 매핑된 충돌, "
+            "표준명에 법인접미어(주식회사/(주)/㈜)가 그대로 남아있는 경우를 찾아줍니다."
+        )
+        if st.button("검증 실행", key="validate_alias_btn"):
+            st.session_state["alias_validation_df"] = load_issuer_aliases_full()
+
+        if "alias_validation_df" in st.session_state:
+            check_df = st.session_state["alias_validation_df"]
+            validation = validate_alias_table(check_df)
+
+            n_dup = check_df.loc[
+                check_df["표준명"].astype(str).str.strip().duplicated(keep=False)
+                & (check_df["표준명"].astype(str).str.strip() != "")
+            ]["표준명"].nunique() if not check_df.empty else 0
+
+            if validation["dup_rows"].empty and not validation["conflicts"] and validation["suffix_rows"].empty:
+                st.success("문제가 발견되지 않았습니다. 👍")
             else:
-                st.subheader("발행사명 별칭 관리")
+                if not validation["dup_rows"].empty:
+                    st.warning(f"표준명이 중복된 회사 {n_dup}개 ({len(validation['dup_rows'])}행)")
+                    st.dataframe(validation["dup_rows"], use_container_width=True, hide_index=True)
+
+                if validation["conflicts"]:
+                    st.warning(f"같은 표기가 서로 다른 표준명에 매핑된 충돌 {len(validation['conflicts'])}건")
+                    conflict_df = pd.DataFrame(
+                        [{"표기": a, "충돌하는 표준명들": " / ".join(c)} for a, c in validation["conflicts"]]
+                    )
+                    st.dataframe(conflict_df, use_container_width=True, hide_index=True)
+
+                if not validation["suffix_rows"].empty:
+                    st.warning(f"표준명에 법인접미어가 남아있는 행 {len(validation['suffix_rows'])}건")
+                    st.dataframe(validation["suffix_rows"], use_container_width=True, hide_index=True)
+
+                st.markdown("**자동 정리안 미리보기**")
                 st.caption(
-                    "회사 하나가 한 행, 각 소스(인포맥스·한신평·나신평·한기평·위너스·DART)가 각각 열입니다. "
-                    "여기서 수정한 내용은 Google Sheets에 즉시 저장되며, 모든 사용자의 대시보드에 바로 반영됩니다."
+                    "표준명에서 법인접미어를 제거하고, 중복행은 각 열의 값을 하나로 합칩니다 "
+                    "(충돌 나는 값은 먼저 나온 값을 채택합니다). 아래 미리보기를 확인 후 적용하세요."
                 )
+                cleaned_preview = build_cleaned_alias_table(check_df)
+                st.caption(f"정리 전 {len(check_df)}행 → 정리 후 {len(cleaned_preview)}행")
+                st.dataframe(cleaned_preview, use_container_width=True, hide_index=True)
 
-                alias_full_df = load_issuer_aliases_full()
+                if st.button("이 정리안으로 저장", key="apply_cleaned_alias_btn"):
+                    try:
+                        save_alias_excel_upload(cleaned_preview)
+                        del st.session_state["alias_validation_df"]
+                        st.success(f"정리된 내용({len(cleaned_preview)}행)을 클라우드 시트에 저장했습니다.")
 
-                search_canon = st.text_input(
-                    "표준명으로 검색", key="alias_search_canon"
-                )
-                view_df = alias_full_df
-                if search_canon and not alias_full_df.empty and "표준명" in alias_full_df.columns:
-                    view_df = alias_full_df[alias_full_df["표준명"].str.contains(search_canon, na=False)]
-
-                if not view_df.empty:
-                    st.dataframe(view_df, use_container_width=True, hide_index=True)
-                else:
-                    st.caption("등록된 별칭이 아직 없습니다." if alias_full_df.empty else "검색 결과가 없습니다.")
-
-                # ------------------------------------------------------------
-                # 엑셀로 다운로드 / 엑셀 업로드로 일괄 저장
-                # ------------------------------------------------------------
-                st.markdown("---")
-                st.markdown("**엑셀로 내려받아 수정 후 일괄 반영**")
-                col_dl, col_ul = st.columns(2)
-
-                with col_dl:
-                    st.caption("현재 별칭 표를 엑셀로 내려받습니다.")
-                    excel_bytes = build_alias_excel_bytes(
-                        alias_full_df if not alias_full_df.empty else pd.DataFrame(columns=ALIAS_HEADER)
-                    )
-                    st.download_button(
-                        "발행사별칭.xlsx 다운로드",
-                        data=excel_bytes,
-                        file_name="발행사별칭.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="alias_excel_download"
-                    )
-
-                with col_ul:
-                    st.caption("엑셀에서 수정한 파일을 업로드하면, 시트 전체를 이 내용으로 덮어씁니다.")
-                    alias_upload = st.file_uploader(
-                        "수정한 발행사별칭.xlsx 업로드", type=["xlsx"], key="alias_excel_upload"
-                    )
-                    if alias_upload is not None:
-                        if st.button("업로드한 내용으로 전체 저장", key="alias_excel_save_btn"):
-                            try:
-                                uploaded_df = pd.read_excel(alias_upload)
-                                save_alias_excel_upload(uploaded_df)
-                                st.success(f"{len(uploaded_df)}개 회사 정보로 별칭 표를 갱신했습니다.")
-
-                                verify_df = load_issuer_aliases_full()
-                                if len(verify_df) == len(uploaded_df):
-                                    st.info(f"✅ 저장 직후 재확인: 클라우드 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
-                                else:
-                                    st.error(
-                                        f"⚠️ 재확인해보니 {len(verify_df)}행이 조회됩니다 (기대값 {len(uploaded_df)}행). "
-                                        "GOOGLE_SHEET_ID 설정을 확인해주세요."
-                                    )
-                            except Exception as e:
-                                st.error(f"저장 중 오류가 발생했습니다: {e}")
-
-                st.warning(
-                    "⚠️ 엑셀 업로드는 시트 **전체를 덮어씁니다**. 다운로드한 최신 파일을 기준으로 수정해서 "
-                    "올려주세요 (다른 사람이 그 사이에 추가한 내용이 있다면 먼저 새로 다운로드하고 반영해서 병합하세요)."
-                )
-
-                # ------------------------------------------------------------
-                # 별칭 표 검증
-                # ------------------------------------------------------------
-                st.markdown("---")
-                st.subheader("별칭 표 검증")
-                st.caption(
-                    "표준명이 중복된 행, 같은 표기가 서로 다른 표준명에 잘못 매핑된 충돌, "
-                    "표준명에 법인접미어(주식회사/(주)/㈜)가 그대로 남아있는 경우를 찾아줍니다."
-                )
-                if st.button("검증 실행", key="validate_alias_btn"):
-                    st.session_state["alias_validation_df"] = load_issuer_aliases_full()
-
-                if "alias_validation_df" in st.session_state:
-                    check_df = st.session_state["alias_validation_df"]
-                    validation = validate_alias_table(check_df)
-
-                    n_dup = check_df.loc[
-                        check_df["표준명"].astype(str).str.strip().duplicated(keep=False)
-                        & (check_df["표준명"].astype(str).str.strip() != "")
-                    ]["표준명"].nunique() if not check_df.empty else 0
-
-                    if validation["dup_rows"].empty and not validation["conflicts"] and validation["suffix_rows"].empty:
-                        st.success("문제가 발견되지 않았습니다. 👍")
-                    else:
-                        if not validation["dup_rows"].empty:
-                            st.warning(f"표준명이 중복된 회사 {n_dup}개 ({len(validation['dup_rows'])}행)")
-                            st.dataframe(validation["dup_rows"], use_container_width=True, hide_index=True)
-
-                        if validation["conflicts"]:
-                            st.warning(f"같은 표기가 서로 다른 표준명에 매핑된 충돌 {len(validation['conflicts'])}건")
-                            conflict_df = pd.DataFrame(
-                                [{"표기": a, "충돌하는 표준명들": " / ".join(c)} for a, c in validation["conflicts"]]
+                        verify_df = load_issuer_aliases_full()
+                        if len(verify_df) == len(cleaned_preview):
+                            st.info(f"✅ 저장 직후 재확인: 클라우드 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
+                        else:
+                            st.error(
+                                f"⚠️ 저장은 오류 없이 끝났지만, 재확인해보니 {len(verify_df)}행이 조회됩니다 "
+                                f"(기대값 {len(cleaned_preview)}행). GOOGLE_SHEET_ID가 다른 시트를 "
+                                "가리키고 있을 수 있으니 Secrets 설정을 확인해주세요."
                             )
-                            st.dataframe(conflict_df, use_container_width=True, hide_index=True)
+                        sheet_id = st.secrets.get("GOOGLE_SHEET_ID", "")
+                        if sheet_id:
+                            st.caption(
+                                f"현재 연결된 시트: https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+                            )
+                    except Exception as e:
+                        st.error(f"저장 중 오류가 발생했습니다: {e}")
 
-                        if not validation["suffix_rows"].empty:
-                            st.warning(f"표준명에 법인접미어가 남아있는 행 {len(validation['suffix_rows'])}건")
-                            st.dataframe(validation["suffix_rows"], use_container_width=True, hide_index=True)
+        # ------------------------------------------------------------
+        # 화면에서 직접 추가/삭제 (엑셀 없이 빠르게)
+        # ------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("**화면에서 바로 추가 (한 개씩)**")
+        col_x, col_y, col_s, col_z = st.columns([2, 2, 2, 1])
+        with col_x:
+            new_alias = st.text_input("이 소스에서 쓰는 표기", key="new_alias_input")
+        with col_y:
+            new_canonical = st.text_input("표준명 (통일해서 쓸 이름)", key="new_canonical_input")
+        with col_s:
+            new_source = st.selectbox("소스(열)", options=ALIAS_SOURCE_COLUMNS, key="new_alias_source")
+        with col_z:
+            st.write("")
+            st.write("")
+            if st.button("추가/갱신", key="add_alias_btn"):
+                if not new_alias.strip() or not new_canonical.strip():
+                    st.error("표기와 표준명을 모두 입력해주세요.")
+                else:
+                    try:
+                        upsert_issuer_alias(new_canonical.strip(), new_source, new_alias.strip())
+                        st.success(f"'{new_canonical}' 행의 '{new_source}' 칸에 '{new_alias}' 저장되었습니다.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"저장 중 오류가 발생했습니다: {e}")
 
-                        st.markdown("**자동 정리안 미리보기**")
+        st.markdown("**화면에서 바로 추가 (여러 개 한 번에, 같은 소스 기준)**")
+        st.caption("한 줄에 하나씩 '표기 = 표준명' 형식으로 입력하세요. 표준명 행이 이미 있으면 해당 소스 칸만 채웁니다.")
+        col_bulk1, col_bulk2 = st.columns([3, 1])
+        with col_bulk1:
+            bulk_text = st.text_area(
+                "일괄 입력", height=120,
+                placeholder="디비증권 = DB증권\n엘지전자 = LG전자\n씨제이씨지브이 = CJ CGV",
+                key="bulk_alias_text"
+            )
+        with col_bulk2:
+            bulk_source = st.selectbox("소스(열, 전체 적용)", options=ALIAS_SOURCE_COLUMNS, key="bulk_alias_source")
+            st.write("")
+            if st.button("일괄 추가/갱신", key="bulk_add_alias_btn"):
+                pairs = []
+                for line in (bulk_text or "").splitlines():
+                    if "=" in line:
+                        a, c = line.split("=", 1)
+                        a, c = a.strip(), c.strip()
+                        if a and c:
+                            pairs.append((a, c))
+                if not pairs:
+                    st.error("형식에 맞는 줄이 없습니다 ('표기 = 표준명' 형식으로 입력해주세요).")
+                else:
+                    try:
+                        upsert_issuer_aliases_bulk(pairs, bulk_source)
+                        st.success(f"{len(pairs)}건 반영되었습니다.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"일괄 저장 중 오류가 발생했습니다: {e}")
+
+        if not alias_full_df.empty:
+            st.markdown("**회사 행 전체 삭제**")
+            col_p, col_q = st.columns([3, 1])
+            with col_p:
+                del_target = st.selectbox(
+                    "삭제할 표준명 선택",
+                    options=sorted(alias_full_df["표준명"].dropna().unique()),
+                    key="del_company_select"
+                )
+            with col_q:
+                st.write("")
+                st.write("")
+                if st.button("행 삭제", key="del_company_btn"):
+                    try:
+                        delete_issuer_company(del_target)
+                        st.success(f"'{del_target}' 행이 삭제되었습니다.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"삭제 중 오류가 발생했습니다: {e}")
+
+        st.markdown("---")
+        st.subheader("DART 기업명·법인고유번호 일괄 매칭")
+        st.caption(
+            "전자공시시스템(DART)의 전체 기업 목록(회사명 + 고유번호)을 한 번에 받아와서, "
+            "별칭 표의 표준명과 자동으로 매칭해 'DART' 열과 '법인고유번호' 열을 함께 채웁니다. "
+            "DART 쪽 기업 목록은 하루 단위로 캐시되니, 최신 목록이 필요하면 버튼을 다시 누르면 됩니다."
+        )
+        if not DART_API_KEY:
+            st.warning(
+                "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud Secrets에 "
+                "DART_API_KEY = \"발급받은키\" 를 등록해주세요."
+            )
+        else:
+            if st.button("DART 기업 목록 불러와서 매칭", key="dart_match_btn"):
+                with st.spinner("DART 기업 목록을 받아오는 중입니다 (처음 조회 시 몇 초 걸릴 수 있습니다)..."):
+                    corp_map = load_corp_code_map(DART_API_KEY)
+                st.caption(f"DART에 등록된 전체 기업 수: {len(corp_map):,}개")
+
+                alias_df_for_dart = load_issuer_aliases_full()
+                if alias_df_for_dart.empty or "표준명" not in alias_df_for_dart.columns:
+                    st.info("별칭 표에 등록된 회사가 아직 없습니다. 먼저 위쪽에서 회사를 추가해주세요.")
+                else:
+                    updated = alias_df_for_dart.copy()
+                    if "법인고유번호" not in updated.columns:
+                        updated["법인고유번호"] = ""
+                    matched_count, filled_rows = 0, []
+                    for idx, row in updated.iterrows():
+                        canon = str(row.get("표준명", "")).strip()
+                        existing_dart = str(row.get("DART", "")).strip() if "DART" in updated.columns else ""
+                        existing_code = str(row.get("법인고유번호", "")).strip()
+                        if not canon or (existing_dart and existing_code):
+                            continue  # 이름·코드 둘 다 이미 있으면 건드리지 않음
+                        matched_name = find_dart_name(canon, corp_map)
+                        if matched_name:
+                            if not existing_dart:
+                                updated.at[idx, "DART"] = matched_name
+                            if not existing_code:
+                                updated.at[idx, "법인고유번호"] = corp_map.get(matched_name, "")
+                            matched_count += 1
+                            filled_rows.append({
+                                "표준명": canon, "DART 매칭명": matched_name,
+                                "법인고유번호": corp_map.get(matched_name, "")
+                            })
+
+                    st.session_state["dart_match_preview"] = updated
+                    st.success(f"{matched_count}개 회사에 새로 DART 회사명/법인고유번호를 채웠습니다 (기존에 값이 있던 칸은 건드리지 않았습니다).")
+                    if filled_rows:
+                        st.dataframe(pd.DataFrame(filled_rows), use_container_width=True, hide_index=True)
+
+            if "dart_match_preview" in st.session_state:
+                st.markdown("**매칭 결과 미리보기 (DART·법인고유번호 열 반영됨)**")
+                st.dataframe(st.session_state["dart_match_preview"], use_container_width=True, hide_index=True, height=300)
+                if st.button("이 매칭 결과 저장", key="save_dart_match_btn"):
+                    try:
+                        save_alias_excel_upload(st.session_state["dart_match_preview"])
+                        del st.session_state["dart_match_preview"]
+                        st.success("DART 매칭 결과를 저장했습니다.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+        st.markdown("---")
+        st.subheader("미매칭 발행사 자동 탐지")
+        st.caption(
+            "저장된 채권 스프레드 이력(인포맥스 발행사 목록)을 기준으로, "
+            "신용등급 트리거·위너스 이력의 발행사명 중 지금 별칭으로도 매칭이 안 되는 이름들을 찾아줍니다. "
+            "이 목록에 뜨는 회사는 '발행사별 상세 보기' 드롭다운에도 같은 회사가 두 번 나타날 수 있습니다."
+        )
+        if st.button("미매칭 발행사 찾기", key="find_unmatched_btn"):
+            with st.spinner("비교하는 중입니다..."):
+                spread_hist_admin = read_history("채권스프레드_이력")
+                trigger_hist_admin = read_history("신용등급트리거_이력")
+                winus_hist_admin = read_history("위너스_이력")
+
+            if spread_hist_admin.empty or "발행사" not in spread_hist_admin.columns:
+                st.warning("채권 스프레드 이력이 없습니다. 먼저 인포맥스 파일을 저장해주세요.")
+            else:
+                infomax_set = set(spread_hist_admin["발행사"].dropna().unique())
+                infomax_set_normalized = {normalize_issuer_name(n) for n in infomax_set}
+
+                unmatched_parts = []
+
+                if not trigger_hist_admin.empty and "원본발행사명" in trigger_hist_admin.columns:
+                    th = trigger_hist_admin.copy()
+                    th["정규화결과"] = th["원본발행사명"].apply(normalize_issuer_name)
+                    th_unmatched = th[~th["정규화결과"].isin(infomax_set_normalized)]
+                    unmatched_parts.append(
+                        th_unmatched[["신평사", "원본발행사명", "정규화결과"]].rename(
+                            columns={"신평사": "소스", "원본발행사명": "원본표기"}
+                        )
+                    )
+
+                if not winus_hist_admin.empty and "발행사명" in winus_hist_admin.columns:
+                    wh = winus_hist_admin.copy()
+                    wh["정규화결과"] = wh["발행사명"].apply(normalize_issuer_name)
+                    wh_unmatched = wh[~wh["정규화결과"].isin(infomax_set_normalized)]
+                    wh_unmatched = wh_unmatched[["발행사명", "정규화결과"]].rename(columns={"발행사명": "원본표기"})
+                    wh_unmatched.insert(0, "소스", "위너스(WINUS)")
+                    unmatched_parts.append(wh_unmatched)
+
+                if not unmatched_parts:
+                    st.warning("비교할 트리거·위너스 이력이 없습니다. 먼저 각 탭에서 저장해주세요.")
+                else:
+                    unmatched = pd.concat(unmatched_parts, ignore_index=True)
+                    if unmatched.empty:
+                        st.success("모든 발행사명이 인포맥스 목록과 매칭됩니다. 👍")
+                    else:
+                        summary = (
+                            unmatched.groupby(["소스", "원본표기", "정규화결과"])
+                            .size().reset_index(name="건수")
+                            .sort_values(["소스", "원본표기"])
+                        )
+                        st.warning(f"인포맥스 목록과 매칭되지 않는 발행사명 {len(summary)}건을 찾았습니다.")
+                        st.dataframe(summary, use_container_width=True, hide_index=True)
                         st.caption(
-                            "표준명에서 법인접미어를 제거하고, 중복행은 각 열의 값을 하나로 합칩니다 "
-                            "(충돌 나는 값은 먼저 나온 값을 채택합니다). 아래 미리보기를 확인 후 적용하세요."
+                            "위 '정규화결과' 값이 실제로는 인포맥스의 어떤 발행사명과 같은 회사인지 확인해서, "
+                            "위쪽 '새 별칭 추가'에 '정규화결과 = 인포맥스표기명' 형태로 등록해주세요."
                         )
-                        cleaned_preview = build_cleaned_alias_table(check_df)
-                        st.caption(f"정리 전 {len(check_df)}행 → 정리 후 {len(cleaned_preview)}행")
-                        st.dataframe(cleaned_preview, use_container_width=True, hide_index=True)
-
-                        if st.button("이 정리안으로 저장", key="apply_cleaned_alias_btn"):
-                            try:
-                                save_alias_excel_upload(cleaned_preview)
-                                del st.session_state["alias_validation_df"]
-                                st.success(f"정리된 내용({len(cleaned_preview)}행)을 클라우드 시트에 저장했습니다.")
-
-                                verify_df = load_issuer_aliases_full()
-                                if len(verify_df) == len(cleaned_preview):
-                                    st.info(f"✅ 저장 직후 재확인: 클라우드 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
-                                else:
-                                    st.error(
-                                        f"⚠️ 저장은 오류 없이 끝났지만, 재확인해보니 {len(verify_df)}행이 조회됩니다 "
-                                        f"(기대값 {len(cleaned_preview)}행). GOOGLE_SHEET_ID가 다른 시트를 "
-                                        "가리키고 있을 수 있으니 Secrets 설정을 확인해주세요."
-                                    )
-                                sheet_id = st.secrets.get("GOOGLE_SHEET_ID", "")
-                                if sheet_id:
-                                    st.caption(
-                                        f"현재 연결된 시트: https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-                                    )
-                            except Exception as e:
-                                st.error(f"저장 중 오류가 발생했습니다: {e}")
-
-                # ------------------------------------------------------------
-                # 화면에서 직접 추가/삭제 (엑셀 없이 빠르게)
-                # ------------------------------------------------------------
-                st.markdown("---")
-                st.markdown("**화면에서 바로 추가 (한 개씩)**")
-                col_x, col_y, col_s, col_z = st.columns([2, 2, 2, 1])
-                with col_x:
-                    new_alias = st.text_input("이 소스에서 쓰는 표기", key="new_alias_input")
-                with col_y:
-                    new_canonical = st.text_input("표준명 (통일해서 쓸 이름)", key="new_canonical_input")
-                with col_s:
-                    new_source = st.selectbox("소스(열)", options=ALIAS_SOURCE_COLUMNS, key="new_alias_source")
-                with col_z:
-                    st.write("")
-                    st.write("")
-                    if st.button("추가/갱신", key="add_alias_btn"):
-                        if not new_alias.strip() or not new_canonical.strip():
-                            st.error("표기와 표준명을 모두 입력해주세요.")
-                        else:
-                            try:
-                                upsert_issuer_alias(new_canonical.strip(), new_source, new_alias.strip())
-                                st.success(f"'{new_canonical}' 행의 '{new_source}' 칸에 '{new_alias}' 저장되었습니다.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"저장 중 오류가 발생했습니다: {e}")
-
-                st.markdown("**화면에서 바로 추가 (여러 개 한 번에, 같은 소스 기준)**")
-                st.caption("한 줄에 하나씩 '표기 = 표준명' 형식으로 입력하세요. 표준명 행이 이미 있으면 해당 소스 칸만 채웁니다.")
-                col_bulk1, col_bulk2 = st.columns([3, 1])
-                with col_bulk1:
-                    bulk_text = st.text_area(
-                        "일괄 입력", height=120,
-                        placeholder="디비증권 = DB증권\n엘지전자 = LG전자\n씨제이씨지브이 = CJ CGV",
-                        key="bulk_alias_text"
-                    )
-                with col_bulk2:
-                    bulk_source = st.selectbox("소스(열, 전체 적용)", options=ALIAS_SOURCE_COLUMNS, key="bulk_alias_source")
-                    st.write("")
-                    if st.button("일괄 추가/갱신", key="bulk_add_alias_btn"):
-                        pairs = []
-                        for line in (bulk_text or "").splitlines():
-                            if "=" in line:
-                                a, c = line.split("=", 1)
-                                a, c = a.strip(), c.strip()
-                                if a and c:
-                                    pairs.append((a, c))
-                        if not pairs:
-                            st.error("형식에 맞는 줄이 없습니다 ('표기 = 표준명' 형식으로 입력해주세요).")
-                        else:
-                            try:
-                                upsert_issuer_aliases_bulk(pairs, bulk_source)
-                                st.success(f"{len(pairs)}건 반영되었습니다.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"일괄 저장 중 오류가 발생했습니다: {e}")
-
-                if not alias_full_df.empty:
-                    st.markdown("**회사 행 전체 삭제**")
-                    col_p, col_q = st.columns([3, 1])
-                    with col_p:
-                        del_target = st.selectbox(
-                            "삭제할 표준명 선택",
-                            options=sorted(alias_full_df["표준명"].dropna().unique()),
-                            key="del_company_select"
-                        )
-                    with col_q:
-                        st.write("")
-                        st.write("")
-                        if st.button("행 삭제", key="del_company_btn"):
-                            try:
-                                delete_issuer_company(del_target)
-                                st.success(f"'{del_target}' 행이 삭제되었습니다.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"삭제 중 오류가 발생했습니다: {e}")
-
-                st.markdown("---")
-                st.subheader("DART 기업명·법인고유번호 일괄 매칭")
-                st.caption(
-                    "전자공시시스템(DART)의 전체 기업 목록(회사명 + 고유번호)을 한 번에 받아와서, "
-                    "별칭 표의 표준명과 자동으로 매칭해 'DART' 열과 '법인고유번호' 열을 함께 채웁니다. "
-                    "DART 쪽 기업 목록은 하루 단위로 캐시되니, 최신 목록이 필요하면 버튼을 다시 누르면 됩니다."
-                )
-                if not DART_API_KEY:
-                    st.warning(
-                        "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud Secrets에 "
-                        "DART_API_KEY = \"발급받은키\" 를 등록해주세요."
-                    )
-                else:
-                    if st.button("DART 기업 목록 불러와서 매칭", key="dart_match_btn"):
-                        with st.spinner("DART 기업 목록을 받아오는 중입니다 (처음 조회 시 몇 초 걸릴 수 있습니다)..."):
-                            corp_map = load_corp_code_map(DART_API_KEY)
-                        st.caption(f"DART에 등록된 전체 기업 수: {len(corp_map):,}개")
-
-                        alias_df_for_dart = load_issuer_aliases_full()
-                        if alias_df_for_dart.empty or "표준명" not in alias_df_for_dart.columns:
-                            st.info("별칭 표에 등록된 회사가 아직 없습니다. 먼저 위쪽에서 회사를 추가해주세요.")
-                        else:
-                            updated = alias_df_for_dart.copy()
-                            if "법인고유번호" not in updated.columns:
-                                updated["법인고유번호"] = ""
-                            matched_count, filled_rows = 0, []
-                            for idx, row in updated.iterrows():
-                                canon = str(row.get("표준명", "")).strip()
-                                existing_dart = str(row.get("DART", "")).strip() if "DART" in updated.columns else ""
-                                existing_code = str(row.get("법인고유번호", "")).strip()
-                                if not canon or (existing_dart and existing_code):
-                                    continue  # 이름·코드 둘 다 이미 있으면 건드리지 않음
-                                matched_name = find_dart_name(canon, corp_map)
-                                if matched_name:
-                                    if not existing_dart:
-                                        updated.at[idx, "DART"] = matched_name
-                                    if not existing_code:
-                                        updated.at[idx, "법인고유번호"] = corp_map.get(matched_name, "")
-                                    matched_count += 1
-                                    filled_rows.append({
-                                        "표준명": canon, "DART 매칭명": matched_name,
-                                        "법인고유번호": corp_map.get(matched_name, "")
-                                    })
-
-                            st.session_state["dart_match_preview"] = updated
-                            st.success(f"{matched_count}개 회사에 새로 DART 회사명/법인고유번호를 채웠습니다 (기존에 값이 있던 칸은 건드리지 않았습니다).")
-                            if filled_rows:
-                                st.dataframe(pd.DataFrame(filled_rows), use_container_width=True, hide_index=True)
-
-                    if "dart_match_preview" in st.session_state:
-                        st.markdown("**매칭 결과 미리보기 (DART·법인고유번호 열 반영됨)**")
-                        st.dataframe(st.session_state["dart_match_preview"], use_container_width=True, hide_index=True, height=300)
-                        if st.button("이 매칭 결과 저장", key="save_dart_match_btn"):
-                            try:
-                                save_alias_excel_upload(st.session_state["dart_match_preview"])
-                                del st.session_state["dart_match_preview"]
-                                st.success("DART 매칭 결과를 저장했습니다.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"저장 중 오류가 발생했습니다: {e}")
-
-                st.markdown("---")
-                st.subheader("미매칭 발행사 자동 탐지")
-                st.caption(
-                    "저장된 채권 스프레드 이력(인포맥스 발행사 목록)을 기준으로, "
-                    "신용등급 트리거·위너스 이력의 발행사명 중 지금 별칭으로도 매칭이 안 되는 이름들을 찾아줍니다. "
-                    "이 목록에 뜨는 회사는 '발행사별 상세 보기' 드롭다운에도 같은 회사가 두 번 나타날 수 있습니다."
-                )
-                if st.button("미매칭 발행사 찾기", key="find_unmatched_btn"):
-                    with st.spinner("비교하는 중입니다..."):
-                        spread_hist_admin = read_history("채권스프레드_이력")
-                        trigger_hist_admin = read_history("신용등급트리거_이력")
-                        winus_hist_admin = read_history("위너스_이력")
-
-                    if spread_hist_admin.empty or "발행사" not in spread_hist_admin.columns:
-                        st.warning("채권 스프레드 이력이 없습니다. 먼저 인포맥스 파일을 저장해주세요.")
-                    else:
-                        infomax_set = set(spread_hist_admin["발행사"].dropna().unique())
-                        infomax_set_normalized = {normalize_issuer_name(n) for n in infomax_set}
-
-                        unmatched_parts = []
-
-                        if not trigger_hist_admin.empty and "원본발행사명" in trigger_hist_admin.columns:
-                            th = trigger_hist_admin.copy()
-                            th["정규화결과"] = th["원본발행사명"].apply(normalize_issuer_name)
-                            th_unmatched = th[~th["정규화결과"].isin(infomax_set_normalized)]
-                            unmatched_parts.append(
-                                th_unmatched[["신평사", "원본발행사명", "정규화결과"]].rename(
-                                    columns={"신평사": "소스", "원본발행사명": "원본표기"}
-                                )
-                            )
-
-                        if not winus_hist_admin.empty and "발행사명" in winus_hist_admin.columns:
-                            wh = winus_hist_admin.copy()
-                            wh["정규화결과"] = wh["발행사명"].apply(normalize_issuer_name)
-                            wh_unmatched = wh[~wh["정규화결과"].isin(infomax_set_normalized)]
-                            wh_unmatched = wh_unmatched[["발행사명", "정규화결과"]].rename(columns={"발행사명": "원본표기"})
-                            wh_unmatched.insert(0, "소스", "위너스(WINUS)")
-                            unmatched_parts.append(wh_unmatched)
-
-                        if not unmatched_parts:
-                            st.warning("비교할 트리거·위너스 이력이 없습니다. 먼저 각 탭에서 저장해주세요.")
-                        else:
-                            unmatched = pd.concat(unmatched_parts, ignore_index=True)
-                            if unmatched.empty:
-                                st.success("모든 발행사명이 인포맥스 목록과 매칭됩니다. 👍")
-                            else:
-                                summary = (
-                                    unmatched.groupby(["소스", "원본표기", "정규화결과"])
-                                    .size().reset_index(name="건수")
-                                    .sort_values(["소스", "원본표기"])
-                                )
-                                st.warning(f"인포맥스 목록과 매칭되지 않는 발행사명 {len(summary)}건을 찾았습니다.")
-                                st.dataframe(summary, use_container_width=True, hide_index=True)
-                                st.caption(
-                                    "위 '정규화결과' 값이 실제로는 인포맥스의 어떤 발행사명과 같은 회사인지 확인해서, "
-                                    "위쪽 '새 별칭 추가'에 '정규화결과 = 인포맥스표기명' 형태로 등록해주세요."
-                                )
