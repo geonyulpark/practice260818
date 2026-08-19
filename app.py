@@ -633,6 +633,69 @@ def fetch_company_overview(corp_code: str, api_key: str):
     return data
 
 
+@st.cache_data(ttl=60 * 60 * 24)
+def fetch_financials_detail(corp_code: str, api_key: str):
+    """'발행사별 상세보기' 전용 상세 재무제표 조회.
+    매출액/영업이익/당기순이익 각각에 대해 당기(해당 분/반기)·당기누적·전년동기·전년동기누적을 함께 담아 반환.
+    DART API 응답의 thstrm_amount(당기)/thstrm_add_amount(당기누적)/
+    frmtrm_q_amount(전년동기)/frmtrm_add_amount(전년동기누적) 필드를 그대로 활용한다."""
+    if not corp_code:
+        return None
+
+    target_accounts = {
+        "매출액": ["매출액", "수익(매출액)", "영업수익"],
+        "영업이익": ["영업이익", "영업이익(손실)"],
+        "당기순이익": ["당기순이익", "당기순이익(손실)"],
+    }
+
+    def to_num(x):
+        try:
+            return int(str(x).replace(",", ""))
+        except (ValueError, TypeError):
+            return None
+
+    this_year = datetime.date.today().year
+    attempts = []
+    for year in [this_year, this_year - 1]:
+        attempts += [
+            (year, "11014", f"{year} 3분기보고서"),
+            (year, "11012", f"{year} 반기보고서"),
+            (year, "11013", f"{year} 1분기보고서"),
+            (year, "11011", f"{year} 사업보고서"),
+        ]
+
+    url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+    for year, reprt_code, label in attempts:
+        for fs_div in ["CFS", "OFS"]:
+            params = {"crtfc_key": api_key, "corp_code": corp_code,
+                      "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div}
+            try:
+                resp = requests.get(url, params=params, timeout=15)
+                data = resp.json()
+            except Exception:
+                continue
+            if data.get("status") != "000":
+                continue
+
+            result = {}
+            for row in data.get("list", []):
+                if row.get("sj_div") not in ("IS", "CIS"):
+                    continue
+                name = row.get("account_nm", "")
+                for metric, names in target_accounts.items():
+                    if metric in result or name not in names:
+                        continue
+                    result[metric] = {
+                        "당기": to_num(row.get("thstrm_amount")),
+                        "당기누적": to_num(row.get("thstrm_add_amount")),
+                        "전년동기": to_num(row.get("frmtrm_q_amount")) or to_num(row.get("frmtrm_amount")),
+                        "전년동기누적": to_num(row.get("frmtrm_add_amount")),
+                    }
+            if result:
+                return {"기준": label, "fs_div": fs_div, "항목": result}
+    return None
+
+
 def normalize_issuer_name(name):
     """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + Google Sheets 별칭)."""
     if pd.isna(name):
@@ -1842,44 +1905,68 @@ elif page == "발행사별 상세보기":
                         else:
                             with st.spinner("DART에서 기업개황·재무제표를 조회하는 중입니다..."):
                                 overview = fetch_company_overview(corp_code, DART_API_KEY)
-                                fin = fetch_financials(corp_code, DART_API_KEY)
+                                fin_detail = fetch_financials_detail(corp_code, DART_API_KEY)
 
-                            col_ov, col_fin = st.columns(2)
-                            with col_ov:
-                                st.caption("기업개황")
-                                if overview:
-                                    overview_rows = [
-                                        ("대표자명", overview.get("ceo_nm")),
-                                        ("법인구분", overview.get("corp_cls")),
-                                        ("법인등록번호", overview.get("jurir_no")),
-                                        ("사업자등록번호", overview.get("bizr_no")),
-                                        ("주소", overview.get("adres")),
-                                        ("홈페이지", overview.get("hm_url")),
-                                        ("설립일", overview.get("est_dt")),
-                                        ("결산월", overview.get("acc_mt")),
-                                    ]
-                                    st.dataframe(
-                                        pd.DataFrame(overview_rows, columns=["항목", "값"]),
-                                        use_container_width=True, hide_index=True
-                                    )
-                                else:
-                                    st.caption("기업개황 정보를 가져오지 못했습니다.")
+                            st.caption("기업개황")
+                            if overview:
+                                overview_rows = [
+                                    ("대표자명", overview.get("ceo_nm")),
+                                    ("법인구분", overview.get("corp_cls")),
+                                    ("법인등록번호", overview.get("jurir_no")),
+                                    ("사업자등록번호", overview.get("bizr_no")),
+                                    ("주소", overview.get("adres")),
+                                    ("홈페이지", overview.get("hm_url")),
+                                    ("설립일", overview.get("est_dt")),
+                                    ("결산월", overview.get("acc_mt")),
+                                ]
+                                st.dataframe(
+                                    pd.DataFrame(overview_rows, columns=["항목", "값"]),
+                                    use_container_width=True, hide_index=True
+                                )
+                            else:
+                                st.caption("기업개황 정보를 가져오지 못했습니다.")
 
-                            with col_fin:
-                                st.caption("재무제표 (최근 공시 기준)")
-                                if fin:
-                                    fin_rows = [
-                                        ("매출액", fin.get("매출액")),
-                                        ("영업이익", fin.get("영업이익")),
-                                        ("당기순이익", fin.get("당기순이익")),
-                                        ("기준", fin.get("재무제표기준일")),
-                                    ]
-                                    st.dataframe(
-                                        pd.DataFrame(fin_rows, columns=["항목", "값"]),
-                                        use_container_width=True, hide_index=True
-                                    )
-                                else:
-                                    st.caption("재무제표 정보를 가져오지 못했습니다.")
+                            st.caption("재무제표")
+                            if fin_detail and fin_detail.get("항목"):
+                                def _fmt_amt(x):
+                                    return f"{x:,}" if x is not None else "-"
+
+                                def _fmt_change(cur, prev):
+                                    if cur is None or prev is None or prev == 0:
+                                        return "-", "-"
+                                    diff = cur - prev
+                                    pct = diff / abs(prev) * 100
+                                    sign = "+" if diff >= 0 else ""
+                                    return f"{sign}{diff:,}", f"{sign}{pct:.1f}%"
+
+                                fin_rows = []
+                                for metric in ["매출액", "영업이익", "당기순이익"]:
+                                    d = fin_detail["항목"].get(metric, {})
+                                    cur, cur_cum = d.get("당기"), d.get("당기누적")
+                                    prev, prev_cum = d.get("전년동기"), d.get("전년동기누적")
+                                    diff_q, pct_q = _fmt_change(cur, prev)
+                                    diff_cum, pct_cum = _fmt_change(cur_cum, prev_cum)
+                                    fin_rows.append({
+                                        "항목": metric,
+                                        "당기": _fmt_amt(cur),
+                                        "전년동기": _fmt_amt(prev),
+                                        "증감(당기)": diff_q,
+                                        "증감률(당기)": pct_q,
+                                        "당기누적": _fmt_amt(cur_cum),
+                                        "전년동기누적": _fmt_amt(prev_cum),
+                                        "증감(누적)": diff_cum,
+                                        "증감률(누적)": pct_cum,
+                                    })
+                                st.caption(
+                                    f"기준: {fin_detail.get('기준')} "
+                                    f"({'연결' if fin_detail.get('fs_div') == 'CFS' else '별도'}재무제표) — "
+                                    "'전년동기'는 작년 같은 분/반기 실적입니다 (직전 분기와의 비교가 아닙니다)."
+                                )
+                                st.dataframe(
+                                    pd.DataFrame(fin_rows), use_container_width=True, hide_index=True
+                                )
+                            else:
+                                st.caption("재무제표 정보를 가져오지 못했습니다.")
 
 # ==============================================================
 # 페이지: 관리자 설정
