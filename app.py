@@ -971,20 +971,22 @@ def show_unmatched_issuer_alert(names, source_label):
     return unmatched
 
 
-def render_clickable_company_row(names, key_prefix, per_row=6):
-    """회사명 목록을 여러 열로 나눠 가로로 나열하고, 클릭된 회사명을 반환 (없으면 None)."""
+def render_company_pills(names, key, other_key=None):
+    """회사명 목록을 칩(pill) 형태로 조밀하게 나열하고, 선택된 회사명을 반환 (없으면 None).
+    other_key를 주면, 이 목록에서 선택했을 때 다른 목록(other_key)의 선택은 자동으로 해제된다."""
     if not names:
+        st.caption("해당 없음")
         return None
-    clicked = None
-    names = list(names)
-    for i in range(0, len(names), per_row):
-        chunk = names[i:i + per_row]
-        cols = st.columns(len(chunk))
-        for col, name in zip(cols, chunk):
-            with col:
-                if st.button(name, key=f"{key_prefix}_{i}_{name}", use_container_width=True):
-                    clicked = name
-    return clicked
+
+    def _on_pick():
+        if other_key is not None:
+            st.session_state[other_key] = None
+
+    picked = st.pills(
+        label="", options=list(names), selection_mode="single",
+        key=key, label_visibility="collapsed", on_change=_on_pick,
+    )
+    return picked
 
 
 NICE_OUTLOOK_MAP = {"S": "안정적", "P": "긍정적", "N": "부정적"}
@@ -1878,17 +1880,17 @@ elif page == "신용등급 트리거":
                 else:
                     hit = as_of_trigger
 
-                # --- 상향/하향 조건 충족 기업을 가로로 나열, 클릭하면 아래 목록이 그 기업으로 좁혀짐 ---
+                # --- 상향/하향 조건 충족 기업을 칩(pill) 형태로 조밀하게 나열, 클릭하면 아래 목록이 그 기업으로 좁혀짐 ---
                 up_companies = sorted(hit[hit.get("충족여부") == "🟢"]["표준명"].dropna().unique())
                 down_companies = sorted(hit[hit.get("충족여부") == "🔴"]["표준명"].dropna().unique())
 
                 st.markdown(f"**🟢 상향 조건 충족 ({len(up_companies)}개사)**")
-                clicked_up = render_clickable_company_row(up_companies, key_prefix="up")
+                clicked_up = render_company_pills(up_companies, key="trigger_up_pills", other_key="trigger_down_pills")
                 if clicked_up:
                     st.session_state["trigger_pick"] = clicked_up
 
                 st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies)}개사)**")
-                clicked_down = render_clickable_company_row(down_companies, key_prefix="down")
+                clicked_down = render_company_pills(down_companies, key="trigger_down_pills", other_key="trigger_up_pills")
                 if clicked_down:
                     st.session_state["trigger_pick"] = clicked_down
 
