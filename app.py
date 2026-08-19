@@ -270,6 +270,72 @@ def normalize_issuer_name(name):
     return aliases.get(s, s)
 
 
+NICE_OUTLOOK_MAP = {"S": "안정적", "P": "긍정적", "N": "부정적"}
+
+def split_rating_outlook(raw, source):
+    """'A+/안정적', 'AA-/S' 같은 표기를 (등급, 등급전망)으로 분리.
+    NICE는 알파벳 코드(S/P/N)를 한글로 변환, 한신평은 이미 한글이라 그대로 사용."""
+    if pd.isna(raw):
+        return None, None
+    text = str(raw).strip()
+    if "/" not in text:
+        return text, None
+    grade, outlook_code = text.split("/", 1)
+    grade, outlook_code = grade.strip(), outlook_code.strip()
+    if source == "나이스신용평가":
+        outlook = NICE_OUTLOOK_MAP.get(outlook_code, outlook_code)
+    else:
+        outlook = outlook_code
+    return grade, outlook
+
+
+RATER_ABBREV = {"한국신용평가": "한신평", "나이스신용평가": "나신평", "한국기업평가": "한기평"}
+
+def parse_period_label(col):
+    """열 이름(2026.03 같은 숫자 또는 '26.03 같은 문자열)을 'YY.MM' 라벨로 변환."""
+    if isinstance(col, (int, float)):
+        year = int(col)
+        frac = round((col - year) * 100)
+        month = frac if frac != 0 else 12
+        return f"{year % 100:02d}.{month:02d}"
+    s = str(col).strip()
+    m = re.match(r"^'?(\d{2,4})\.(\d{1,2})", s)
+    if m:
+        yy, mm = m.groups()
+        yy = int(yy)
+        year = yy if yy > 100 else (2000 + yy)
+        return f"{year % 100:02d}.{int(mm):02d}"
+    return s
+
+
+def check_trigger_met(actual, operator, threshold, direction):
+    """실제 수치가 상향/하향 트리거 조건을 충족하는지 판정.
+    판정 불가(숫자 아님 등)면 None, 충족하면 True, 아니면 False.
+    Google Sheets에서 불러온 값은 전부 문자열일 수 있으므로 둘 다 안전하게 float 변환한다."""
+    if pd.isna(actual) or pd.isna(operator) or pd.isna(threshold) or operator == "":
+        return None
+    try:
+        actual_num = float(str(actual).replace(",", ""))
+        threshold_num = float(str(threshold).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+    ops = {
+        ">=": actual_num >= threshold_num, "<=": actual_num <= threshold_num,
+        ">": actual_num > threshold_num, "<": actual_num < threshold_num,
+    }
+    return ops.get(operator)
+
+
+def trigger_signal(row):
+    """방향(상향/하향)과 충족 여부를 신호등 이모지로 변환."""
+    met = check_trigger_met(row.get("실제수치"), row.get("연산자"), row.get("값"), row.get("방향"))
+    if met is None:
+        return "-"
+    if not met:
+        return ""
+    return "🟢" if row.get("방향") == "상향" else "🔴"
+
+
 # ==============================================================
 # TAB 1: 채권 스프레드 대시보드 (기존 기능)
 # ==============================================================
@@ -631,24 +697,6 @@ with tab2:
             return "억원"
         return None
 
-    NICE_OUTLOOK_MAP = {"S": "안정적", "P": "긍정적", "N": "부정적"}
-
-    def split_rating_outlook(raw, source):
-        """'A+/안정적', 'AA-/S' 같은 표기를 (등급, 등급전망)으로 분리.
-        NICE는 알파벳 코드(S/P/N)를 한글로 변환, 한신평은 이미 한글이라 그대로 사용."""
-        if pd.isna(raw):
-            return None, None
-        text = str(raw).strip()
-        if "/" not in text:
-            return text, None
-        grade, outlook_code = text.split("/", 1)
-        grade, outlook_code = grade.strip(), outlook_code.strip()
-        if source == "나이스신용평가":
-            outlook = NICE_OUTLOOK_MAP.get(outlook_code, outlook_code)
-        else:
-            outlook = outlook_code
-        return grade, outlook
-
     st.caption(
         "💡 회사명 표기 차이(별칭)는 이제 **'관리자 설정'** 탭에서 관리합니다. "
         "새로운 표기 차이를 발견하시면 그 탭에서 추가해주세요."
@@ -671,6 +719,9 @@ with tab2:
         try:
             eff_date = extract_effective_date(f_is_corp, sheet_name='업체별 KMI 지표 및 실적')
             df = pd.read_excel(f_is_corp, sheet_name='업체별 KMI 지표 및 실적', header=13)
+            up_idx = df.columns.get_loc('상향가능성')
+            latest_col = df.columns[up_idx - 1]
+            latest_label = parse_period_label(latest_col)
             for _, r in df.iterrows():
                 issuer, indicator = r.get('업체명'), r.get('KMI 지표')
                 if pd.isna(issuer) or pd.isna(indicator):
@@ -682,7 +733,8 @@ with tab2:
                     grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
                     rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
                                   "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
-                                  "지표명": indicator, "방향": direction, **parsed,
+                                  "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
+                                  "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
             st.error(f"한신평 기업부문 파일 처리 오류: {e}")
@@ -692,6 +744,9 @@ with tab2:
         try:
             eff_date = extract_effective_date(f_is_fin, sheet_name='업체별 KMI 지표 및 실적')
             df = pd.read_excel(f_is_fin, sheet_name='업체별 KMI 지표 및 실적', header=13)
+            up_idx = df.columns.get_loc('상향가능성')
+            latest_col = df.columns[up_idx - 1]
+            latest_label = parse_period_label(latest_col)
             for _, r in df.iterrows():
                 issuer, indicator = r.get('업체명'), r.get('KMI')
                 if pd.isna(issuer) or pd.isna(indicator) or r.get('정성/정량') != '정량':
@@ -703,7 +758,8 @@ with tab2:
                     grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
                     rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
                                   "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
-                                  "지표명": indicator, "방향": direction, **parsed,
+                                  "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
+                                  "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
             st.error(f"한신평 금융부문 파일 처리 오류: {e}")
@@ -720,6 +776,9 @@ with tab2:
                 indicator_col = [c for c in df.columns if '트리거지표' in c][0]
                 up_col = [c for c in df.columns if '상향' in c][0]
                 down_col = [c for c in df.columns if '하향' in c][0]
+                up_idx = df.columns.get_loc(up_col)
+                latest_col = df.columns[up_idx - 1]
+                latest_label = parse_period_label(latest_col)
                 for _, r in df.iterrows():
                     issuer, indicator = r.get(issuer_col), r.get(indicator_col)
                     if pd.isna(issuer) or pd.isna(indicator):
@@ -731,7 +790,8 @@ with tab2:
                         grade, outlook = split_rating_outlook(r.get(rating_col), "나이스신용평가")
                         rows.append({"신평사": "나이스신용평가", "기준일": eff_date, "원본발행사명": issuer,
                                       "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
-                                      "지표명": indicator, "방향": direction, **parsed,
+                                      "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
+                                      "방향": direction, **parsed,
                                       "단위": infer_unit(indicator, parsed["단위"])})
             except Exception as e:
                 st.error(f"{label} 파일 처리 오류: {e}")
@@ -741,6 +801,10 @@ with tab2:
         try:
             eff_date = extract_effective_date(f_kr, sheet_name='Sheet1')
             df = pd.read_excel(f_kr, sheet_name='Sheet1', header=25)
+            # KR은 시계열 실적 열이 상향/하향보다 뒤에 위치 (예: 2023.12, 2024.12, 2025.12, 2026.03)
+            period_candidates = [c for c in df.columns if isinstance(c, (int, float)) and c > 2000]
+            latest_col = max(period_candidates) if period_candidates else None
+            latest_label = parse_period_label(latest_col) if latest_col is not None else None
             for _, r in df.iterrows():
                 issuer, indicator = r.get('업체명'), r.get('등급변동요인')
                 if pd.isna(issuer) or pd.isna(indicator):
@@ -752,17 +816,25 @@ with tab2:
                     rows.append({"신평사": "한국기업평가", "기준일": eff_date, "원본발행사명": issuer,
                                   "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
                                   "등급전망": r.get('등급전망'),
-                                  "지표명": indicator, "방향": direction, **parsed,
+                                  "지표명": indicator,
+                                  "실제수치": r.get(latest_col) if latest_col is not None else None,
+                                  "기준월": latest_label,
+                                  "방향": direction, **parsed,
                                   "단위": infer_unit(indicator, parsed["단위"])})
         except Exception as e:
             st.error(f"한기평(KR) 파일 처리 오류: {e}")
 
     if rows:
         unified = pd.DataFrame(rows)
+        unified["충족여부"] = unified.apply(trigger_signal, axis=1)
         st.success(f"총 {len(unified)}개 트리거 항목을 통합했습니다 (신평사 {unified['신평사'].nunique()}개사).")
 
         date_summary = unified.groupby("신평사")["기준일"].first()
         st.caption("신평사별 인식된 기준일: " + ", ".join(f"{k} {v}" for k, v in date_summary.items()))
+
+        period_labels = unified["기준월"].dropna().unique()
+        period_label_text = period_labels[0] if len(period_labels) > 0 else "YY.MM"
+        actual_col_name = f"실제 수치({period_label_text})"
 
         st.subheader("발행사 검색")
         search = st.text_input("발행사명 입력 (부분 검색 가능)", key="trigger_search")
@@ -772,8 +844,16 @@ with tab2:
         else:
             hit = unified
 
+        display_df = hit.copy()
+        display_df["신평사"] = display_df["신평사"].map(RATER_ABBREV).fillna(display_df["신평사"])
+        display_df = display_df.rename(columns={"실제수치": actual_col_name})
+
         st.dataframe(
-            hit[["발행사(정규화)", "원본발행사명", "신평사", "기준일", "등급", "등급전망", "지표명", "방향", "원문", "연산자", "값", "단위", "특이조건"]],
+            display_df[[
+                "원본발행사명", "발행사(정규화)", "신평사", "기준일", "등급", "등급전망",
+                "지표명", actual_col_name, "충족여부",
+                "방향", "원문", "연산자", "값", "단위", "특이조건"
+            ]],
             use_container_width=True, hide_index=True
         )
 
@@ -951,11 +1031,29 @@ with tab3:
                             if issuer_trigger.empty:
                                 st.caption("이 발행사에 대한 트리거 정보를 찾지 못했습니다 (회사명 표기 차이일 수 있습니다).")
                             else:
+                                it = issuer_trigger.copy()
+                                if "신평사" in it.columns:
+                                    it["신평사"] = it["신평사"].map(RATER_ABBREV).fillna(it["신평사"])
+
+                                actual_header = "실제수치"
+                                if "기준월" in it.columns:
+                                    labels = it["기준월"].dropna().unique()
+                                    if len(labels) > 0:
+                                        actual_header = f"실제 수치({labels[0]})"
+
+                                if "충족여부" not in it.columns and {"실제수치", "연산자", "값", "방향"} <= set(it.columns):
+                                    it["충족여부"] = it.apply(trigger_signal, axis=1)
+
+                                if "실제수치" in it.columns:
+                                    it = it.rename(columns={"실제수치": actual_header})
+
                                 display_cols = [c for c in
-                                    ["신평사", "기준일", "등급", "등급전망", "지표명", "방향", "원문", "특이조건"]
-                                    if c in issuer_trigger.columns]
+                                    ["원본발행사명", "신평사", "기준일", "등급", "등급전망",
+                                     "지표명", actual_header, "충족여부",
+                                     "방향", "원문", "특이조건"]
+                                    if c in it.columns]
                                 st.dataframe(
-                                    issuer_trigger[display_cols],
+                                    it[display_cols],
                                     use_container_width=True, hide_index=True
                                 )
 
