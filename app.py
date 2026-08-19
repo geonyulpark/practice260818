@@ -804,76 +804,91 @@ def fetch_full_financial_report(corp_code: str, api_key: str):
 
     result = {"BS": None, "연간손익": None, "분기손익": None, "meta": {}}
 
-    # --- 1) 재무상태표: 올해 가장 최근 보고서 → 없으면 작년 사업보고서 ---
-    for year, reprt_code, label in [
-        (this_year, "11014", f"{this_year} 3분기말"), (this_year, "11012", f"{this_year} 반기말"),
-        (this_year, "11013", f"{this_year} 1분기말"), (last_year, "11011", f"{last_year} 사업연도말"),
-    ]:
-        rows, fs_div = _fetch_dart_report(corp_code, api_key, year, reprt_code)
+    QUARTER_REPRT = [("11013", "1분기"), ("11012", "2분기"), ("11014", "3분기")]
+
+    # --- 0) 미리 필요한 원본들을 확보 ---
+    rows_last_annual, _ = _fetch_dart_report(corp_code, api_key, last_year, "11011")   # 작년 사업보고서
+    annual_is = _extract_is_values(rows_last_annual)
+    annual_bs = _extract_bs_values(rows_last_annual)
+
+    # 올해 존재하는 분기 원본들을 전부 확보 (1분기→2분기→3분기 순, 있는 만큼)
+    this_year_quarters = {}  # {"1분기": rows, "2분기": rows, "3분기": rows}
+    for reprt_code, q_label in QUARTER_REPRT:
+        rows, _ = _fetch_dart_report(corp_code, api_key, this_year, reprt_code)
         if rows:
-            bs = _extract_bs_values(rows)
-            if bs:
-                result["BS"] = bs
-                result["meta"]["BS_기준"] = label
-                break
+            this_year_quarters[q_label] = rows
+
+    # --- 1) 재무상태표: 2024년말/2025년말은 작년 사업보고서에서, 올해 최신은 올해 최신 분기에서 ---
+    latest_q_label_for_bs, latest_q_rows = None, None
+    for q_label in ["3분기", "2분기", "1분기"]:
+        if q_label in this_year_quarters:
+            latest_q_label_for_bs = q_label
+            latest_q_rows = this_year_quarters[q_label]
+            break
+
+    bs_result = {}
+    for metric in BS_ACCOUNTS:
+        d_annual = annual_bs.get(metric, {})
+        v_2024 = d_annual.get("전기말")     # 작년 사업보고서의 전기말 = 전전년(2024)말
+        v_2025 = d_annual.get("당기말")     # 작년 사업보고서의 당기말 = 작년(2025)말
+        v_latest = None
+        if latest_q_rows:
+            d_latest = _extract_bs_values(latest_q_rows).get(metric, {})
+            v_latest = d_latest.get("당기말")
+        bs_result[metric] = {f"{last_year - 1}년": v_2024, f"{last_year}년": v_2025,
+                              "최신": v_latest}
+    result["BS"] = bs_result
+    result["meta"]["BS_라벨"] = [f"{last_year - 1}년", f"{last_year}년",
+                                f"{this_year}년 {latest_q_label_for_bs}" if latest_q_label_for_bs else f"{this_year}년(자료없음)"]
 
     # --- 2) 연도별 손익계산서: 작년 사업보고서(전년+전전년) + 올해 최신 누적 ---
-    rows_annual, _ = _fetch_dart_report(corp_code, api_key, last_year, "11011")
-    annual_is = _extract_is_values(rows_annual)
-
     latest_ytd, latest_ytd_label = {}, None
-    for reprt_code, label in [("11014", f"{this_year} 3분기 누적(9개월)"),
-                               ("11012", f"{this_year} 반기 누적(6개월)"),
-                               ("11013", f"{this_year} 1분기 누적(3개월)")]:
-        rows, _ = _fetch_dart_report(corp_code, api_key, this_year, reprt_code)
-        is_vals = _extract_is_values(rows)
-        if is_vals:
-            latest_ytd, latest_ytd_label = is_vals, label
-            break
+    for q_label, cum_label in [("3분기", f"{this_year} 3분기 누적(9개월)"),
+                                ("2분기", f"{this_year} 반기 누적(6개월)"),
+                                ("1분기", f"{this_year} 1분기 누적(3개월)")]:
+        if q_label in this_year_quarters:
+            is_vals = _extract_is_values(this_year_quarters[q_label])
+            if is_vals:
+                latest_ytd, latest_ytd_label = is_vals, cum_label
+                break
 
     result["연간손익"] = {
         "전전년도": {"라벨": f"{last_year - 1}년(연간)",
-                   "값": {m: annual_is.get(m, {}).get("전전기") for m in IS_ACCOUNTS}},
+                   "값": {m: annual_is.get(m, {}).get("전기") for m in IS_ACCOUNTS}},
         "전년도": {"라벨": f"{last_year}년(연간)",
-                 "값": {m: annual_is.get(m, {}).get("전기") for m in IS_ACCOUNTS}},
+                 "값": {m: annual_is.get(m, {}).get("당기") for m in IS_ACCOUNTS}},
         "올해누적": {"라벨": latest_ytd_label or "조회 실패",
                   "값": {m: latest_ytd.get(m, {}).get("당기누적") for m in IS_ACCOUNTS}},
     }
 
-    # --- 3) 분기별 손익계산서: 작년 1~4분기(단독) + 올해 최신 분기(단독) ---
-    rows_q1, _ = _fetch_dart_report(corp_code, api_key, last_year, "11013")
-    is_q1 = _extract_is_values(rows_q1)
-    rows_h1, _ = _fetch_dart_report(corp_code, api_key, last_year, "11012")
-    is_h1 = _extract_is_values(rows_h1)
-    rows_q3, _ = _fetch_dart_report(corp_code, api_key, last_year, "11014")
-    is_q3 = _extract_is_values(rows_q3)
+    # --- 3) 분기별 손익계산서: 작년 1~4분기(단독) + 올해 존재하는 분기 전부(단독) ---
+    is_q1_last = _extract_is_values(_fetch_dart_report(corp_code, api_key, last_year, "11013")[0])
+    is_h1_last = _extract_is_values(_fetch_dart_report(corp_code, api_key, last_year, "11012")[0])
+    is_q3_last = _extract_is_values(_fetch_dart_report(corp_code, api_key, last_year, "11014")[0])
 
-    q4 = {}
+    q4_last = {}
     for m in IS_ACCOUNTS:
-        annual_val = annual_is.get(m, {}).get("당기")     # 사업보고서 당기 = 연간 전체
-        q3_cum = is_q3.get(m, {}).get("당기누적")          # 3분기보고서 누적 = 9개월
-        q4[m] = (annual_val - q3_cum) if (annual_val is not None and q3_cum is not None) else None
+        annual_val = annual_is.get(m, {}).get("당기")       # 사업보고서 당기 = 연간 전체
+        q3_cum = is_q3_last.get(m, {}).get("당기누적")       # 3분기보고서 누적 = 9개월
+        q4_last[m] = (annual_val - q3_cum) if (annual_val is not None and q3_cum is not None) else None
 
-    q_data = {
-        "1분기": {m: is_q1.get(m, {}).get("당기") for m in IS_ACCOUNTS},
-        "2분기": {m: is_h1.get(m, {}).get("당기") for m in IS_ACCOUNTS},
-        "3분기": {m: is_q3.get(m, {}).get("당기") for m in IS_ACCOUNTS},
-        "4분기": q4,
+    last_year_q_data = {
+        "1분기": {m: is_q1_last.get(m, {}).get("당기") for m in IS_ACCOUNTS},
+        "2분기": {m: is_h1_last.get(m, {}).get("당기") for m in IS_ACCOUNTS},
+        "3분기": {m: is_q3_last.get(m, {}).get("당기") for m in IS_ACCOUNTS},
+        "4분기": q4_last,
     }
 
-    latest_q, latest_q_label = {}, None
-    for reprt_code, label in [("11014", f"{this_year} 3분기"), ("11012", f"{this_year} 2분기"),
-                               ("11013", f"{this_year} 1분기")]:
-        rows, _ = _fetch_dart_report(corp_code, api_key, this_year, reprt_code)
-        is_vals = _extract_is_values(rows)
-        if is_vals:
-            latest_q = {m: is_vals.get(m, {}).get("당기") for m in IS_ACCOUNTS}
-            latest_q_label = label
-            break
+    # 올해는 존재하는 분기 전부(1→2→3분기), 각각 '당기'(=해당 분기 단독) 값 사용
+    this_year_q_data = {}
+    for q_label in ["1분기", "2분기", "3분기"]:
+        if q_label in this_year_quarters:
+            is_vals = _extract_is_values(this_year_quarters[q_label])
+            this_year_q_data[q_label] = {m: is_vals.get(m, {}).get("당기") for m in IS_ACCOUNTS}
 
     result["분기손익"] = {
-        "직전년도": {"연도": last_year, "분기": q_data},
-        "올해최신분기": {"라벨": latest_q_label or "조회 실패", "값": latest_q},
+        "직전년도": {"연도": last_year, "분기": last_year_q_data},
+        "올해": {"연도": this_year, "분기": this_year_q_data},
     }
 
     return result
@@ -2123,19 +2138,21 @@ elif page == "발행사별 상세보기":
                                 # --- 1) 재무상태표: 총자산/총부채/자기자본 ---
                                 st.markdown(f"**재무상태표** ({unit})")
                                 bs = full_report.get("BS")
+                                bs_labels = full_report["meta"].get("BS_라벨", ["전전기", "전기", "최신"])
                                 if bs:
-                                    st.caption(f"기준: {full_report['meta'].get('BS_기준', '-')}")
                                     bs_rows = []
                                     for metric in ["총자산", "총부채", "자기자본"]:
                                         d = bs.get(metric, {})
-                                        prev2, prev1, cur = d.get("전전기말"), d.get("전기말"), d.get("당기말")
+                                        prev2 = d.get(bs_labels[0])
+                                        prev1 = d.get(bs_labels[1])
+                                        cur = d.get("최신")
                                         diff, pct = fmt_unit_change(cur, prev1, unit)
                                         bs_rows.append({
                                             "항목": metric,
-                                            "전전기말": fmt_unit(prev2, unit),
-                                            "전기말": fmt_unit(prev1, unit),
-                                            "당기(최신)": fmt_unit(cur, unit),
-                                            "증감(전기말 대비)": diff,
+                                            bs_labels[0]: fmt_unit(prev2, unit),
+                                            bs_labels[1]: fmt_unit(prev1, unit),
+                                            bs_labels[2]: fmt_unit(cur, unit),
+                                            f"증감({bs_labels[1]} 대비)": diff,
                                             "증감률": pct,
                                         })
                                     st.dataframe(pd.DataFrame(bs_rows), use_container_width=True, hide_index=True)
@@ -2160,26 +2177,57 @@ elif page == "발행사별 상세보기":
                                 else:
                                     st.caption("연도별 손익계산서 정보를 가져오지 못했습니다.")
 
-                                # --- 3) 분기별 손익계산서 ---
+                                # --- 3) 분기별 손익계산서: 작년 1~4분기 + 올해 존재하는 분기 전부 ---
                                 st.markdown(f"**분기별 손익계산서** ({unit})")
                                 quarterly = full_report.get("분기손익")
+                                q_series = []  # 차트용: [(라벨, 매출액, 영업이익), ...] 시간순
                                 if quarterly:
                                     last_yr = quarterly["직전년도"]["연도"]
                                     q_map = quarterly["직전년도"]["분기"]
-                                    latest_label = quarterly["올해최신분기"]["라벨"]
-                                    latest_vals = quarterly["올해최신분기"]["값"]
-                                    st.caption(f"열: {last_yr}년 1~4분기 / {latest_label}")
+                                    this_yr = quarterly["올해"]["연도"]
+                                    this_q_map = quarterly["올해"]["분기"]
+
+                                    this_year_qs = [q for q in ["1분기", "2분기", "3분기"] if q in this_q_map]
+                                    col_labels = [f"{last_yr} {q}" for q in ["1분기", "2분기", "3분기", "4분기"]] \
+                                                 + [f"{this_yr} {q}" for q in this_year_qs]
+                                    st.caption("열: " + " / ".join(col_labels))
+
                                     q_rows = []
                                     for metric in ["매출액", "영업이익", "당기순이익"]:
                                         row = {"항목": metric}
                                         for q in ["1분기", "2분기", "3분기", "4분기"]:
                                             row[f"{last_yr} {q}"] = fmt_unit(q_map.get(q, {}).get(metric), unit)
-                                        row[latest_label] = fmt_unit(latest_vals.get(metric), unit)
+                                        for q in this_year_qs:
+                                            row[f"{this_yr} {q}"] = fmt_unit(this_q_map.get(q, {}).get(metric), unit)
                                         q_rows.append(row)
                                     st.dataframe(pd.DataFrame(q_rows), use_container_width=True, hide_index=True)
                                     st.caption("4분기는 사업보고서(연간) 수치에서 3분기 누적을 뺀 값이라, 결산 조정 등으로 실제 공시치와 약간 다를 수 있습니다.")
+
+                                    # 차트용 시계열 구성 (매출액/영업이익 원 단위 그대로 두고 화면에서 단위 나눔)
+                                    for q in ["1분기", "2분기", "3분기", "4분기"]:
+                                        q_series.append((f"{last_yr} {q}", q_map.get(q, {}).get("매출액"), q_map.get(q, {}).get("영업이익")))
+                                    for q in this_year_qs:
+                                        q_series.append((f"{this_yr} {q}", this_q_map.get(q, {}).get("매출액"), this_q_map.get(q, {}).get("영업이익")))
                                 else:
                                     st.caption("분기별 손익계산서 정보를 가져오지 못했습니다.")
+
+                                # --- 4) 매출액·영업이익·영업이익률 차트 ---
+                                if q_series:
+                                    st.markdown(f"**매출액 · 영업이익 · 영업이익률 추이** ({unit})")
+                                    chart_df = pd.DataFrame(q_series, columns=["분기", "매출액", "영업이익"]).set_index("분기")
+                                    divisor = UNIT_DIVISORS.get(unit, 1)
+                                    chart_scaled = chart_df[["매출액", "영업이익"]].apply(lambda s: s / divisor)
+                                    st.bar_chart(chart_scaled)
+
+                                    margin_df = chart_df.copy()
+                                    margin_df["영업이익률(%)"] = margin_df.apply(
+                                        lambda r: (r["영업이익"] / r["매출액"] * 100)
+                                        if pd.notna(r["매출액"]) and r["매출액"] not in (0, None) and pd.notna(r["영업이익"])
+                                        else None,
+                                        axis=1
+                                    )
+                                    st.caption("영업이익률(%)")
+                                    st.line_chart(margin_df[["영업이익률(%)"]])
 
 # ==============================================================
 # 페이지: 관리자 설정
