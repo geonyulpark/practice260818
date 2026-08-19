@@ -569,6 +569,70 @@ def find_dart_name(issuer_name: str, corp_map: dict):
     return None
 
 
+@st.cache_data(ttl=60 * 60 * 24)
+def fetch_financials(corp_code: str, api_key: str):
+    """corp_code로 가장 최근 재무제표(매출액/영업이익/당기순이익)를 조회. 최신 분기→반기→1분기→사업보고서 순으로 시도."""
+    if not corp_code:
+        return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "매칭 실패"}
+    this_year = datetime.date.today().year
+    attempts = []
+    for year in [this_year, this_year - 1]:
+        attempts += [
+            (year, "11014", f"{year} 3분기보고서"),
+            (year, "11012", f"{year} 반기보고서"),
+            (year, "11013", f"{year} 1분기보고서"),
+            (year, "11011", f"{year} 사업보고서"),
+        ]
+    url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+    for year, reprt_code, label in attempts:
+        for fs_div in ["CFS", "OFS"]:
+            params = {"crtfc_key": api_key, "corp_code": corp_code,
+                      "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div}
+            try:
+                resp = requests.get(url, params=params, timeout=15)
+                data = resp.json()
+            except Exception:
+                continue
+            if data.get("status") != "000":
+                continue
+            revenue = op_income = net_income = None
+            for row in data.get("list", []):
+                if row.get("sj_div") != "IS":
+                    continue
+                name = row.get("account_nm", "")
+                raw = (row.get("thstrm_amount") or "").replace(",", "")
+                try:
+                    amt = int(raw)
+                except ValueError:
+                    continue
+                if name in ("매출액", "수익(매출액)", "영업수익"):
+                    revenue = amt
+                elif name == "영업이익":
+                    op_income = amt
+                elif name in ("당기순이익", "당기순이익(손실)"):
+                    net_income = amt
+            if revenue is not None or op_income is not None or net_income is not None:
+                return {"매출액": revenue, "영업이익": op_income, "당기순이익": net_income, "재무제표기준일": label}
+    return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "조회 실패"}
+
+
+@st.cache_data(ttl=60 * 60 * 24)
+def fetch_company_overview(corp_code: str, api_key: str):
+    """DART 기업개황(company.json) API로 회사 기본 정보를 조회."""
+    if not corp_code:
+        return None
+    url = "https://opendart.fss.or.kr/api/company.json"
+    params = {"crtfc_key": api_key, "corp_code": corp_code}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        data = resp.json()
+    except Exception:
+        return None
+    if data.get("status") != "000":
+        return None
+    return data
+
+
 def normalize_issuer_name(name):
     """회사명 표기 차이를 최대한 흡수 (지주/홀딩스/괄호 표기 + Google Sheets 별칭)."""
     if pd.isna(name):
@@ -700,52 +764,6 @@ if page == "데이터 업로드":
     )
     with upload_tab1:
         st.caption("인포맥스 채권 수익률 파일을 업로드하면 '공모/무보증' 발행사만 자동으로 필터링해 보여줍니다.")
-
-
-        @st.cache_data(ttl=60 * 60 * 24)
-        def fetch_financials(corp_code: str, api_key: str):
-            if not corp_code:
-                return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "매칭 실패"}
-            this_year = datetime.date.today().year
-            attempts = []
-            for year in [this_year, this_year - 1]:
-                attempts += [
-                    (year, "11014", f"{year} 3분기보고서"),
-                    (year, "11012", f"{year} 반기보고서"),
-                    (year, "11013", f"{year} 1분기보고서"),
-                    (year, "11011", f"{year} 사업보고서"),
-                ]
-            url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
-            for year, reprt_code, label in attempts:
-                for fs_div in ["CFS", "OFS"]:
-                    params = {"crtfc_key": api_key, "corp_code": corp_code,
-                              "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div}
-                    try:
-                        resp = requests.get(url, params=params, timeout=15)
-                        data = resp.json()
-                    except Exception:
-                        continue
-                    if data.get("status") != "000":
-                        continue
-                    revenue = op_income = net_income = None
-                    for row in data.get("list", []):
-                        if row.get("sj_div") != "IS":
-                            continue
-                        name = row.get("account_nm", "")
-                        raw = (row.get("thstrm_amount") or "").replace(",", "")
-                        try:
-                            amt = int(raw)
-                        except ValueError:
-                            continue
-                        if name in ("매출액", "수익(매출액)", "영업수익"):
-                            revenue = amt
-                        elif name == "영업이익":
-                            op_income = amt
-                        elif name in ("당기순이익", "당기순이익(손실)"):
-                            net_income = amt
-                    if revenue is not None or op_income is not None or net_income is not None:
-                        return {"매출액": revenue, "영업이익": op_income, "당기순이익": net_income, "재무제표기준일": label}
-            return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "조회 실패"}
 
         KSIC_LARGE = {
             "A": "농업, 임업 및 어업", "B": "광업", "C": "제조업",
@@ -1791,6 +1809,82 @@ elif page == "발행사별 상세보기":
                                 issuer_winus[winus_cols],
                                 use_container_width=True, hide_index=True
                             )
+
+                    st.markdown(f"**{pick_issuer} — DART 기업개황 및 재무제표**")
+                    if not DART_API_KEY:
+                        st.caption("DART API 키가 설정되어 있지 않아 이 정보를 조회할 수 없습니다.")
+                    else:
+                        show_dart = st.checkbox(
+                            "DART에서 기업개황·재무제표 조회 (최초 조회 시 몇 초 걸릴 수 있습니다)",
+                            key="detail_dart_checkbox"
+                        )
+                        if show_dart:
+                            # 1) corp_code 확보: 별칭 표에 저장된 법인고유번호를 우선 사용 (빠르고 정확함)
+                            corp_code = None
+                            alias_full_for_detail = load_issuer_aliases_full()
+                            if (
+                                not alias_full_for_detail.empty
+                                and "표준명" in alias_full_for_detail.columns
+                                and "법인고유번호" in alias_full_for_detail.columns
+                            ):
+                                match_row = alias_full_for_detail[alias_full_for_detail["표준명"] == norm_pick]
+                                if not match_row.empty:
+                                    stored_code = str(match_row.iloc[0]["법인고유번호"]).strip()
+                                    if stored_code:
+                                        corp_code = stored_code
+
+                            # 2) 별칭 표에 없으면 DART 전체 목록에서 실시간 매칭
+                            if not corp_code:
+                                with st.spinner("DART에서 기업 코드를 찾는 중입니다..."):
+                                    corp_map = load_corp_code_map(DART_API_KEY)
+                                    corp_code = find_corp_code(pick_issuer, corp_map) or find_corp_code(norm_pick, corp_map)
+
+                            if not corp_code:
+                                st.caption(
+                                    "DART에서 이 발행사의 기업 코드를 찾지 못했습니다. "
+                                    "관리자 탭에서 법인고유번호를 직접 등록해두시면 더 정확하게 찾을 수 있습니다."
+                                )
+                            else:
+                                with st.spinner("DART에서 기업개황·재무제표를 조회하는 중입니다..."):
+                                    overview = fetch_company_overview(corp_code, DART_API_KEY)
+                                    fin = fetch_financials(corp_code, DART_API_KEY)
+
+                                col_ov, col_fin = st.columns(2)
+                                with col_ov:
+                                    st.caption("기업개황")
+                                    if overview:
+                                        overview_rows = [
+                                            ("대표자명", overview.get("ceo_nm")),
+                                            ("법인구분", overview.get("corp_cls")),
+                                            ("법인등록번호", overview.get("jurir_no")),
+                                            ("사업자등록번호", overview.get("bizr_no")),
+                                            ("주소", overview.get("adres")),
+                                            ("홈페이지", overview.get("hm_url")),
+                                            ("설립일", overview.get("est_dt")),
+                                            ("결산월", overview.get("acc_mt")),
+                                        ]
+                                        st.dataframe(
+                                            pd.DataFrame(overview_rows, columns=["항목", "값"]),
+                                            use_container_width=True, hide_index=True
+                                        )
+                                    else:
+                                        st.caption("기업개황 정보를 가져오지 못했습니다.")
+
+                                with col_fin:
+                                    st.caption("재무제표 (최근 공시 기준)")
+                                    if fin:
+                                        fin_rows = [
+                                            ("매출액", fin.get("매출액")),
+                                            ("영업이익", fin.get("영업이익")),
+                                            ("당기순이익", fin.get("당기순이익")),
+                                            ("기준", fin.get("재무제표기준일")),
+                                        ]
+                                        st.dataframe(
+                                            pd.DataFrame(fin_rows, columns=["항목", "값"]),
+                                            use_container_width=True, hide_index=True
+                                        )
+                                    else:
+                                        st.caption("재무제표 정보를 가져오지 못했습니다.")
 
 # ==============================================================
 # 페이지: 관리자 설정
