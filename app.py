@@ -971,27 +971,27 @@ def show_unmatched_issuer_alert(names, source_label):
     return unmatched
 
 
-def render_company_pills(names, key, other_key=None, format_func=None):
-    """회사명 목록을 칩(pill) 형태로 조밀하게 나열하고, 선택된 회사명을 반환 (없으면 None).
-    other_key를 주면, 이 목록에서 선택했을 때 다른 목록(other_key)의 선택은 자동으로 해제된다.
-    format_func을 주면 화면 표시 라벨만 바꾸고(예: '회사명 (익스포저)'), 반환값은 항상 원래 이름이다."""
+def render_company_buttons(names, key_prefix, format_func=None, highlight_func=None, per_row=4):
+    """회사명 목록을 버튼 그리드로 나열하고, 클릭된 회사명을 반환 (없으면 None).
+    highlight_func(name)이 True를 반환하면 그 버튼 전체가 강조된(primary) 스타일로 표시된다."""
     if not names:
         st.caption("해당 없음")
         return None
-
-    def _on_pick():
-        if other_key is not None:
-            st.session_state[other_key] = None
-
-    kwargs = {}
-    if format_func is not None:
-        kwargs["format_func"] = format_func
-
-    picked = st.pills(
-        label="", options=list(names), selection_mode="single",
-        key=key, label_visibility="collapsed", on_change=_on_pick, **kwargs,
-    )
-    return picked
+    clicked = None
+    names = list(names)
+    for i in range(0, len(names), per_row):
+        chunk = names[i:i + per_row]
+        cols = st.columns(len(chunk))
+        for col, name in zip(cols, chunk):
+            with col:
+                label = format_func(name) if format_func else name
+                is_highlight = highlight_func(name) if highlight_func else False
+                if st.button(
+                    label, key=f"{key_prefix}_{i}_{name}", use_container_width=True,
+                    type="primary" if is_highlight else "secondary",
+                ):
+                    clicked = name
+    return clicked
 
 
 def get_total_exposure(name, winus_latest):
@@ -1900,7 +1900,7 @@ elif page == "신용등급 트리거":
                     winus_latest_for_trigger = pd.DataFrame()
 
                 def build_exposure_table(name_counts):
-                    """{표준명: 충족건수} 형태의 Series를 받아 위너스 익스포저를 붙인 표를 잔여한도 내림차순으로 반환."""
+                    """{표준명: 충족건수} 형태의 Series를 받아 위너스 익스포저를 붙인 표를 충족건수 내림차순으로 반환."""
                     rows = []
                     for name, cnt in name_counts.items():
                         match = winus_latest_for_trigger[winus_latest_for_trigger.get("표준명") == name] \
@@ -1909,18 +1909,20 @@ elif page == "신용등급 트리거":
                             m = match.iloc[0]
                             rows.append({
                                 "표준명": name, "충족건수": cnt,
-                                "검토의견": m.get("검토의견") or "-",
                                 "익스포저합계": get_total_exposure(name, winus_latest_for_trigger),
-                                "잔여한도": pd.to_numeric(m.get("잔여한도"), errors="coerce"),
-                                "투자한도": pd.to_numeric(m.get("투자한도"), errors="coerce"),
                                 "회사채잔액": pd.to_numeric(m.get("회사채잔액"), errors="coerce"),
+                                "CP잔액": pd.to_numeric(m.get("CP잔액"), errors="coerce"),
+                                "CD잔액": pd.to_numeric(m.get("CD잔액"), errors="coerce"),
+                                "RP잔액": pd.to_numeric(m.get("RP잔액"), errors="coerce"),
+                                "정기예금잔액": pd.to_numeric(m.get("정기예금잔액"), errors="coerce"),
                             })
                         else:
-                            rows.append({"표준명": name, "충족건수": cnt, "검토의견": "-",
-                                          "익스포저합계": None, "잔여한도": None, "투자한도": None, "회사채잔액": None})
+                            rows.append({"표준명": name, "충족건수": cnt, "익스포저합계": None,
+                                          "회사채잔액": None, "CP잔액": None, "CD잔액": None,
+                                          "RP잔액": None, "정기예금잔액": None})
                     df = pd.DataFrame(rows)
                     if not df.empty:
-                        df = df.sort_values("잔여한도", ascending=False, na_position="last")
+                        df = df.sort_values("충족건수", ascending=False)
                     return df
 
                 # 표준명(라이브 재계산)과 충족여부를 검색·목록 구성 전에 미리 확보
@@ -1955,12 +1957,16 @@ elif page == "신용등급 트리거":
 
                 def _pill_format(name):
                     exp = get_total_exposure(name, winus_latest_for_trigger)
-                    return name if exp is None else f"{name} ({exp:,.0f}억원)"
+                    return name if exp is None else f"{name} · {exp:,.0f}억원"
+
+                def _has_exposure(name):
+                    return get_total_exposure(name, winus_latest_for_trigger) is not None
 
                 st.markdown(f"**🟢 상향 조건 충족 ({len(up_companies_all)}개사, 충족 건수 많은 순)**")
+                st.caption("음영 표시된 버튼 = 위너스 익스포저 데이터가 있는 발행사")
                 up_list = up_companies_all if st.session_state["trigger_show_all_up"] else up_companies_all[:MAX_SHOW]
-                clicked_up = render_company_pills(
-                    up_list, key="trigger_up_pills", other_key="trigger_down_pills", format_func=_pill_format
+                clicked_up = render_company_buttons(
+                    up_list, key_prefix="up", format_func=_pill_format, highlight_func=_has_exposure
                 )
                 if clicked_up:
                     st.session_state["trigger_pick"] = clicked_up
@@ -1968,13 +1974,14 @@ elif page == "신용등급 트리거":
                     if st.button(f"전체보기 (총 {len(up_companies_all)}개)", key="trigger_up_show_all_btn"):
                         st.session_state["trigger_show_all_up"] = True
                         st.rerun()
-                with st.expander("📊 익스포저 포함 표로 보기 (잔여한도 많은 순)"):
+                with st.expander("표로 보기"):
                     st.dataframe(build_exposure_table(up_counts), use_container_width=True, hide_index=True)
 
                 st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies_all)}개사, 충족 건수 많은 순)**")
+                st.caption("음영 표시된 버튼 = 위너스 익스포저 데이터가 있는 발행사")
                 down_list = down_companies_all if st.session_state["trigger_show_all_down"] else down_companies_all[:MAX_SHOW]
-                clicked_down = render_company_pills(
-                    down_list, key="trigger_down_pills", other_key="trigger_up_pills", format_func=_pill_format
+                clicked_down = render_company_buttons(
+                    down_list, key_prefix="down", format_func=_pill_format, highlight_func=_has_exposure
                 )
                 if clicked_down:
                     st.session_state["trigger_pick"] = clicked_down
@@ -1982,7 +1989,7 @@ elif page == "신용등급 트리거":
                     if st.button(f"전체보기 (총 {len(down_companies_all)}개)", key="trigger_down_show_all_btn"):
                         st.session_state["trigger_show_all_down"] = True
                         st.rerun()
-                with st.expander("📊 익스포저 포함 표로 보기 (잔여한도 많은 순)"):
+                with st.expander("표로 보기"):
                     st.dataframe(build_exposure_table(down_counts), use_container_width=True, hide_index=True)
 
                 # 선택된 회사가 지금 목록에 더 이상 없으면(검색어 변경 등) 선택 해제
