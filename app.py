@@ -14,9 +14,32 @@ st.subheader("🧭 Compass")
 
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["채권 스프레드 대시보드", "신용등급 변동 트리거", "일자별 통합 조회", "⚙️ 관리자 설정"]
-)
+
+NAV_VIEW_PAGES = ["채권 스프레드", "신용등급 트리거", "익스포저", "발행사별 상세보기"]
+NAV_ADMIN_PAGES = ["데이터 업로드", "관리자 설정"]
+
+if "nav_page" not in st.session_state:
+    st.session_state.nav_page = NAV_VIEW_PAGES[0]
+
+with st.sidebar:
+    st.markdown("### 🧭 Compass")
+    st.markdown("---")
+    st.markdown("**조회**")
+    for _p in NAV_VIEW_PAGES:
+        if st.button(_p, key=f"nav_btn_{_p}", use_container_width=True,
+                     type="primary" if st.session_state.nav_page == _p else "secondary"):
+            st.session_state.nav_page = _p
+            st.rerun()
+    st.markdown("---")
+    st.markdown("**관리**")
+    for _p in NAV_ADMIN_PAGES:
+        if st.button(_p, key=f"nav_btn_{_p}", use_container_width=True,
+                     type="primary" if st.session_state.nav_page == _p else "secondary"):
+            st.session_state.nav_page = _p
+            st.rerun()
+
+page = st.session_state.nav_page
+
 
 # ==============================================================
 # 공통 유틸
@@ -598,649 +621,637 @@ def parse_winus_file(file_obj):
     return result, None
 
 
+
 # ==============================================================
-# TAB 1: 채권 스프레드 대시보드 (기존 기능)
+# 페이지: 데이터 업로드
 # ==============================================================
-with tab1:
-    st.caption("인포맥스 채권 수익률 파일을 업로드하면 '공모/무보증' 발행사만 자동으로 필터링해 보여줍니다.")
+if page == "데이터 업로드":
+    st.header("데이터 업로드")
+    upload_tab1, upload_tab2, upload_tab3 = st.tabs(
+        ["인포맥스 채권 스프레드", "신용평가사 트리거", "위너스 익스포저"]
+    )
+    with upload_tab1:
+        st.caption("인포맥스 채권 수익률 파일을 업로드하면 '공모/무보증' 발행사만 자동으로 필터링해 보여줍니다.")
 
-    @st.cache_data(ttl=60 * 60 * 24)
-    def load_corp_code_map(api_key: str):
-        url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={api_key}"
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        zf = zipfile.ZipFile(io.BytesIO(resp.content))
-        xml_bytes = zf.read(zf.namelist()[0])
-        root = ET.fromstring(xml_bytes)
-        mapping = {}
-        for item in root.findall("list"):
-            corp_name = (item.findtext("corp_name") or "").strip()
-            corp_code = (item.findtext("corp_code") or "").strip()
-            if corp_name and corp_code:
-                mapping[corp_name] = corp_code
-        return mapping
+        @st.cache_data(ttl=60 * 60 * 24)
+        def load_corp_code_map(api_key: str):
+            url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={api_key}"
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            zf = zipfile.ZipFile(io.BytesIO(resp.content))
+            xml_bytes = zf.read(zf.namelist()[0])
+            root = ET.fromstring(xml_bytes)
+            mapping = {}
+            for item in root.findall("list"):
+                corp_name = (item.findtext("corp_name") or "").strip()
+                corp_code = (item.findtext("corp_code") or "").strip()
+                if corp_name and corp_code:
+                    mapping[corp_name] = corp_code
+            return mapping
 
-    def find_corp_code(issuer_name: str, corp_map: dict):
-        if issuer_name in corp_map:
-            return corp_map[issuer_name]
-        for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
-            candidate = issuer_name.replace(suffix, "").strip()
-            if candidate in corp_map:
-                return corp_map[candidate]
-        candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
-        if len(candidates) == 1:
-            return corp_map[candidates[0]]
-        return None
+        def find_corp_code(issuer_name: str, corp_map: dict):
+            if issuer_name in corp_map:
+                return corp_map[issuer_name]
+            for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
+                candidate = issuer_name.replace(suffix, "").strip()
+                if candidate in corp_map:
+                    return corp_map[candidate]
+            candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
+            if len(candidates) == 1:
+                return corp_map[candidates[0]]
+            return None
 
-    @st.cache_data(ttl=60 * 60 * 24)
-    def fetch_financials(corp_code: str, api_key: str):
-        if not corp_code:
-            return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "매칭 실패"}
-        this_year = datetime.date.today().year
-        attempts = []
-        for year in [this_year, this_year - 1]:
-            attempts += [
-                (year, "11014", f"{year} 3분기보고서"),
-                (year, "11012", f"{year} 반기보고서"),
-                (year, "11013", f"{year} 1분기보고서"),
-                (year, "11011", f"{year} 사업보고서"),
-            ]
-        url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
-        for year, reprt_code, label in attempts:
-            for fs_div in ["CFS", "OFS"]:
-                params = {"crtfc_key": api_key, "corp_code": corp_code,
-                          "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div}
-                try:
-                    resp = requests.get(url, params=params, timeout=15)
-                    data = resp.json()
-                except Exception:
-                    continue
-                if data.get("status") != "000":
-                    continue
-                revenue = op_income = net_income = None
-                for row in data.get("list", []):
-                    if row.get("sj_div") != "IS":
-                        continue
-                    name = row.get("account_nm", "")
-                    raw = (row.get("thstrm_amount") or "").replace(",", "")
+        @st.cache_data(ttl=60 * 60 * 24)
+        def fetch_financials(corp_code: str, api_key: str):
+            if not corp_code:
+                return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "매칭 실패"}
+            this_year = datetime.date.today().year
+            attempts = []
+            for year in [this_year, this_year - 1]:
+                attempts += [
+                    (year, "11014", f"{year} 3분기보고서"),
+                    (year, "11012", f"{year} 반기보고서"),
+                    (year, "11013", f"{year} 1분기보고서"),
+                    (year, "11011", f"{year} 사업보고서"),
+                ]
+            url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+            for year, reprt_code, label in attempts:
+                for fs_div in ["CFS", "OFS"]:
+                    params = {"crtfc_key": api_key, "corp_code": corp_code,
+                              "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div}
                     try:
-                        amt = int(raw)
-                    except ValueError:
+                        resp = requests.get(url, params=params, timeout=15)
+                        data = resp.json()
+                    except Exception:
                         continue
-                    if name in ("매출액", "수익(매출액)", "영업수익"):
-                        revenue = amt
-                    elif name == "영업이익":
-                        op_income = amt
-                    elif name in ("당기순이익", "당기순이익(손실)"):
-                        net_income = amt
-                if revenue is not None or op_income is not None or net_income is not None:
-                    return {"매출액": revenue, "영업이익": op_income, "당기순이익": net_income, "재무제표기준일": label}
-        return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "조회 실패"}
+                    if data.get("status") != "000":
+                        continue
+                    revenue = op_income = net_income = None
+                    for row in data.get("list", []):
+                        if row.get("sj_div") != "IS":
+                            continue
+                        name = row.get("account_nm", "")
+                        raw = (row.get("thstrm_amount") or "").replace(",", "")
+                        try:
+                            amt = int(raw)
+                        except ValueError:
+                            continue
+                        if name in ("매출액", "수익(매출액)", "영업수익"):
+                            revenue = amt
+                        elif name == "영업이익":
+                            op_income = amt
+                        elif name in ("당기순이익", "당기순이익(손실)"):
+                            net_income = amt
+                    if revenue is not None or op_income is not None or net_income is not None:
+                        return {"매출액": revenue, "영업이익": op_income, "당기순이익": net_income, "재무제표기준일": label}
+            return {"매출액": None, "영업이익": None, "당기순이익": None, "재무제표기준일": "조회 실패"}
 
-    KSIC_LARGE = {
-        "A": "농업, 임업 및 어업", "B": "광업", "C": "제조업",
-        "D": "전기,가스,증기 및 공기조절 공급업", "E": "수도,하수 및 폐기물 처리업",
-        "F": "건설업", "G": "도매 및 소매업", "H": "운수 및 창고업",
-        "I": "숙박 및 음식점업", "J": "정보통신업", "K": "금융 및 보험업",
-        "L": "부동산업", "M": "전문,과학 및 기술 서비스업",
-        "N": "사업시설관리 및 사업지원 서비스업", "O": "공공행정,국방 및 사회보장행정",
-        "P": "교육 서비스업", "Q": "보건업 및 사회복지 서비스업",
-        "R": "예술,스포츠 및 여가관련 서비스업", "S": "협회·단체,수리 및 기타 개인서비스업",
-        "T": "가구내 고용활동 및 자가소비 생산활동", "U": "국제 및 외국기관",
-    }
-    MATURITY_COLS_WANTED = ["3M", "6M", "9M", "1Y", "3Y", "5Y"]
+        KSIC_LARGE = {
+            "A": "농업, 임업 및 어업", "B": "광업", "C": "제조업",
+            "D": "전기,가스,증기 및 공기조절 공급업", "E": "수도,하수 및 폐기물 처리업",
+            "F": "건설업", "G": "도매 및 소매업", "H": "운수 및 창고업",
+            "I": "숙박 및 음식점업", "J": "정보통신업", "K": "금융 및 보험업",
+            "L": "부동산업", "M": "전문,과학 및 기술 서비스업",
+            "N": "사업시설관리 및 사업지원 서비스업", "O": "공공행정,국방 및 사회보장행정",
+            "P": "교육 서비스업", "Q": "보건업 및 사회복지 서비스업",
+            "R": "예술,스포츠 및 여가관련 서비스업", "S": "협회·단체,수리 및 기타 개인서비스업",
+            "T": "가구내 고용활동 및 자가소비 생산활동", "U": "국제 및 외국기관",
+        }
+        MATURITY_COLS_WANTED = ["3M", "6M", "9M", "1Y", "3Y", "5Y"]
 
-    BOND_CATEGORIES = ["공모/무보증", "은행채", "카드채", "기타금융채"]
+        BOND_CATEGORIES = ["공모/무보증", "은행채", "카드채", "기타금융채"]
 
-    def _split_category_grade(raw):
-        """'은행채 AA+' -> ('은행채', 'AA+') 처럼 앞의 카테고리 표기와 등급을 분리."""
-        text = str(raw).strip()
-        for cat in BOND_CATEGORIES:
-            if text.startswith(cat):
-                return cat, text[len(cat):].strip()
-        return None, text
+        def _split_category_grade(raw):
+            """'은행채 AA+' -> ('은행채', 'AA+') 처럼 앞의 카테고리 표기와 등급을 분리."""
+            text = str(raw).strip()
+            for cat in BOND_CATEGORIES:
+                if text.startswith(cat):
+                    return cat, text[len(cat):].strip()
+            return None, text
 
-    def parse_infomax_bond_file(file_obj):
-        """인포맥스 채권 수익률 엑셀 → (정제된 result df, 사용된 만기 열 목록). 실패 시 (None, 오류메시지).
-        공모/무보증, 은행채, 카드채, 기타금융채 네 종류만 추출한다."""
-        try:
-            df = pd.read_excel(file_obj, header=2)
-        except Exception as e:
-            return None, f"파일을 읽는 중 오류가 발생했습니다: {e}"
+        def parse_infomax_bond_file(file_obj):
+            """인포맥스 채권 수익률 엑셀 → (정제된 result df, 사용된 만기 열 목록). 실패 시 (None, 오류메시지).
+            공모/무보증, 은행채, 카드채, 기타금융채 네 종류만 추출한다."""
+            try:
+                df = pd.read_excel(file_obj, header=2)
+            except Exception as e:
+                return None, f"파일을 읽는 중 오류가 발생했습니다: {e}"
 
-        rating_col = df.columns[4]
-        issuer_col = '발행사'
-        if rating_col not in df.columns or issuer_col not in df.columns:
-            return None, "예상한 열 구조와 다릅니다. 파일 형식을 확인해주세요."
+            rating_col = df.columns[4]
+            issuer_col = '발행사'
+            if rating_col not in df.columns or issuer_col not in df.columns:
+                return None, "예상한 열 구조와 다릅니다. 파일 형식을 확인해주세요."
 
-        mask_rating = df[rating_col].astype(str).str.strip().apply(
-            lambda x: any(str(x).startswith(cat) for cat in BOND_CATEGORIES)
+            mask_rating = df[rating_col].astype(str).str.strip().apply(
+                lambda x: any(str(x).startswith(cat) for cat in BOND_CATEGORIES)
+            )
+            filtered = df[mask_rating].copy()
+            filtered = filtered[filtered[issuer_col] != filtered[rating_col]]
+
+            maturity_cols = [c for c in MATURITY_COLS_WANTED if c in filtered.columns]
+            industry_col = "업종분류(소)"
+            industry_code_col = "업종코드"
+
+            display_cols = [rating_col, industry_col, issuer_col] + maturity_cols
+            if industry_code_col in filtered.columns:
+                display_cols = [industry_code_col] + display_cols
+            display_cols = [c for c in display_cols if c in filtered.columns]
+
+            result = filtered[display_cols].rename(
+                columns={rating_col: "신용등급그룹", industry_col: "업종구분", industry_code_col: "업종코드"}
+            )
+
+            cat_grade = result["신용등급그룹"].apply(_split_category_grade)
+            result.insert(0, "채권종류", [c for c, g in cat_grade])
+            result["신용등급그룹"] = [g for c, g in cat_grade]
+            # 'AAA(산금-이표)', 'AAA(중금-할인)' 같은 괄호 부가설명은 제거하고 순수 등급만 남긴다
+            result["신용등급그룹"] = (
+                result["신용등급그룹"].astype(str).str.replace(r"\(.*\)", "", regex=True).str.strip()
+            )
+
+            result["업종구분"] = result["업종구분"].fillna("미분류")
+
+            if "업종코드" in result.columns:
+                result["산업대분류"] = result["업종코드"].astype(str).str[0].map(KSIC_LARGE).fillna("미분류")
+                result = result.drop(columns=["업종코드"])
+                cols = ["산업대분류"] + [c for c in result.columns if c != "산업대분류"]
+                result = result[cols]
+
+            return result, maturity_cols
+
+        # ------------------------------------------------------------
+        # 과거 데이터 일괄 업로드 (여러 파일을 한 번에 이력에 저장)
+        # ------------------------------------------------------------
+        with st.expander("과거 데이터 일괄 업로드 (여러 날짜 파일을 한 번에 이력 저장)"):
+            st.caption(
+                "파일명에 8자리 날짜(YYYYMMDD)가 포함되어 있으면 자동으로 그 날짜로 저장됩니다 "
+                "(예: 4788-20260714.xlsx → 2026-07-14). 날짜가 없는 파일은 오늘 날짜로 저장됩니다."
+            )
+            bulk_files = st.file_uploader(
+                "과거 인포맥스 파일 여러 개 선택", type=["xlsx", "xls"],
+                accept_multiple_files=True, key="bulk_infomax"
+            )
+
+            if bulk_files:
+                st.write(f"{len(bulk_files)}개 파일이 선택되었습니다.")
+                if st.button("전체 이력에 일괄 저장", key="bulk_save_btn"):
+                    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+                        st.warning(
+                            "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+                            "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+                        )
+                    else:
+                        progress = st.progress(0.0, text="일괄 저장 중...")
+                        success_count, fail_list = 0, []
+                        for i, f in enumerate(bulk_files):
+                            res, info = parse_infomax_bond_file(f)
+                            if res is None:
+                                fail_list.append(f"{f.name}: {info}")
+                            else:
+                                date_str = extract_date_from_filename(f.name)
+                                try:
+                                    append_history(res, "채권스프레드_이력", date_str)
+                                    success_count += 1
+                                except Exception as e:
+                                    fail_list.append(f"{f.name}: 저장 오류 - {e}")
+                            progress.progress((i + 1) / len(bulk_files),
+                                               text=f"처리 중... ({i+1}/{len(bulk_files)})")
+                        progress.empty()
+
+                        st.success(f"{success_count}/{len(bulk_files)}개 파일 저장 완료")
+                        if fail_list:
+                            st.error("다음 파일은 처리하지 못했습니다:\n" + "\n".join(fail_list))
+
+        uploaded_file = st.file_uploader(
+            "인포맥스 엑셀 파일을 업로드하세요 (예: 4788-YYYYMMDD.xlsx)", type=["xlsx", "xls"], key="infomax"
         )
-        filtered = df[mask_rating].copy()
-        filtered = filtered[filtered[issuer_col] != filtered[rating_col]]
 
-        maturity_cols = [c for c in MATURITY_COLS_WANTED if c in filtered.columns]
-        industry_col = "업종분류(소)"
-        industry_code_col = "업종코드"
+        if uploaded_file is not None:
+            result, info = parse_infomax_bond_file(uploaded_file)
+            if result is None:
+                st.error(info)
+                st.stop()
+            maturity_cols = info
+            issuer_col = '발행사'
 
-        display_cols = [rating_col, industry_col, issuer_col] + maturity_cols
-        if industry_code_col in filtered.columns:
-            display_cols = [industry_code_col] + display_cols
-        display_cols = [c for c in display_cols if c in filtered.columns]
+            st.subheader("필터")
+            col_bt, col0, col1, col2 = st.columns(4)
 
-        result = filtered[display_cols].rename(
-            columns={rating_col: "신용등급그룹", industry_col: "업종구분", industry_code_col: "업종코드"}
-        )
+            with col_bt:
+                bond_type_options = sorted(result["채권종류"].dropna().unique())
+                selected_bond_types = st.multiselect(
+                    "채권종류 선택", options=bond_type_options, default=bond_type_options
+                )
 
-        cat_grade = result["신용등급그룹"].apply(_split_category_grade)
-        result.insert(0, "채권종류", [c for c, g in cat_grade])
-        result["신용등급그룹"] = [g for c, g in cat_grade]
-        # 'AAA(산금-이표)', 'AAA(중금-할인)' 같은 괄호 부가설명은 제거하고 순수 등급만 남긴다
-        result["신용등급그룹"] = (
-            result["신용등급그룹"].astype(str).str.replace(r"\(.*\)", "", regex=True).str.strip()
-        )
+            with col0:
+                industry_options = sorted(
+                    result[result["채권종류"].isin(selected_bond_types)]["산업대분류"].unique()
+                )
+                selected_industries = st.multiselect(
+                    "산업 대분류 선택", options=industry_options, default=industry_options
+                )
 
-        result["업종구분"] = result["업종구분"].fillna("미분류")
+            with col1:
+                rating_options = sorted(
+                    result[
+                        result["채권종류"].isin(selected_bond_types)
+                        & result["산업대분류"].isin(selected_industries)
+                    ]["신용등급그룹"].unique()
+                )
+                selected_ratings = st.multiselect(
+                    "신용등급 선택", options=rating_options, default=rating_options
+                )
 
-        if "업종코드" in result.columns:
-            result["산업대분류"] = result["업종코드"].astype(str).str[0].map(KSIC_LARGE).fillna("미분류")
-            result = result.drop(columns=["업종코드"])
-            cols = ["산업대분류"] + [c for c in result.columns if c != "산업대분류"]
-            result = result[cols]
+            issuer_pool = result[
+                result["채권종류"].isin(selected_bond_types)
+                & result["산업대분류"].isin(selected_industries)
+                & result["신용등급그룹"].isin(selected_ratings)
+            ][issuer_col].sort_values().unique()
 
-        return result, maturity_cols
+            with col2:
+                selected_issuers = st.multiselect(
+                    "발행사 선택 (비워두면 전체 표시)", options=issuer_pool
+                )
 
-    # ------------------------------------------------------------
-    # 과거 데이터 일괄 업로드 (여러 파일을 한 번에 이력에 저장)
-    # ------------------------------------------------------------
-    with st.expander("과거 데이터 일괄 업로드 (여러 날짜 파일을 한 번에 이력 저장)"):
-        st.caption(
-            "파일명에 8자리 날짜(YYYYMMDD)가 포함되어 있으면 자동으로 그 날짜로 저장됩니다 "
-            "(예: 4788-20260714.xlsx → 2026-07-14). 날짜가 없는 파일은 오늘 날짜로 저장됩니다."
-        )
-        bulk_files = st.file_uploader(
-            "과거 인포맥스 파일 여러 개 선택", type=["xlsx", "xls"],
-            accept_multiple_files=True, key="bulk_infomax"
-        )
+            view = result[
+                result["채권종류"].isin(selected_bond_types)
+                & result["산업대분류"].isin(selected_industries)
+                & result["신용등급그룹"].isin(selected_ratings)
+            ]
+            if selected_issuers:
+                view = view[view[issuer_col].isin(selected_issuers)]
 
-        if bulk_files:
-            st.write(f"{len(bulk_files)}개 파일이 선택되었습니다.")
-            if st.button("전체 이력에 일괄 저장", key="bulk_save_btn"):
+            use_dart = st.checkbox(
+                "DART 재무제표 함께 조회 (매출액·영업이익·당기순이익 — 최초 조회 시 다소 시간 소요, 이후 캐시됨)",
+                value=False
+            )
+
+            financial_cols = ["매출액", "영업이익", "당기순이익", "재무제표기준일"]
+
+            if use_dart:
+                if not DART_API_KEY:
+                    st.warning(
+                        "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud의 App settings → Secrets에 "
+                        "DART_API_KEY = \"발급받은키\" 형식으로 등록해주세요."
+                    )
+                else:
+                    with st.spinner("DART에서 재무제표를 조회하는 중입니다..."):
+                        corp_map = load_corp_code_map(DART_API_KEY)
+                        unique_issuers = view[issuer_col].unique().tolist()
+                        progress = st.progress(0.0, text="재무제표 조회 중...")
+                        fin_rows = []
+                        for i, name in enumerate(unique_issuers):
+                            corp_code = find_corp_code(name, corp_map)
+                            fin = fetch_financials(corp_code, DART_API_KEY)
+                            fin[issuer_col] = name
+                            fin_rows.append(fin)
+                            progress.progress((i + 1) / max(len(unique_issuers), 1),
+                                               text=f"재무제표 조회 중... ({i+1}/{len(unique_issuers)})")
+                        progress.empty()
+
+                    fin_df = pd.DataFrame(fin_rows)
+                    view = view.merge(fin_df, on=issuer_col, how="left")
+                    other_cols = [c for c in view.columns if c not in financial_cols]
+                    view = view[other_cols + ["매출액", "영업이익", "당기순이익", "재무제표기준일"]]
+
+            st.subheader(f"공모/무보증 발행사 목록 ({len(view)}개)")
+            st.dataframe(view, use_container_width=True, hide_index=True)
+
+            st.subheader("신용등급별 발행사 수")
+            counts_by_type_rating = view.groupby(["채권종류", "신용등급그룹"]).size()
+            counts_by_type_rating.index = [f"{t} {r}" for t, r in counts_by_type_rating.index]
+            st.bar_chart(counts_by_type_rating.rename("발행사 수"))
+
+            if maturity_cols:
+                st.subheader("등급별 만기별 평균 수익률 (채권종류별)")
+                st.caption("은행채·카드채·기타금융채·공모무보증은 같은 등급이라도 스프레드 수준이 달라 채권종류별로 따로 계산합니다.")
+                rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
+                                 "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-"]
+                for bond_type in [c for c in bond_type_options if c in view["채권종류"].unique()]:
+                    subset = view[view["채권종류"] == bond_type]
+                    if subset.empty:
+                        continue
+                    avg_by_rating = subset.groupby("신용등급그룹")[maturity_cols].mean().round(3)
+                    ordered = [r for r in rating_order if r in avg_by_rating.index]
+                    remaining = [r for r in avg_by_rating.index if r not in rating_order]
+                    avg_by_rating = avg_by_rating.loc[ordered + remaining]
+                    st.markdown(f"**{bond_type}**")
+                    st.dataframe(avg_by_rating, use_container_width=True)
+                    st.line_chart(avg_by_rating.T)
+
+            if maturity_cols:
+                st.subheader("발행사별 만기 수익률 비교")
+                pick = st.multiselect(
+                    "비교할 발행사 선택 (최대 10개 추천)",
+                    options=view[issuer_col].tolist(), default=view[issuer_col].tolist()[:5]
+                )
+                if pick:
+                    chart_data = view[view[issuer_col].isin(pick)].set_index(issuer_col)[maturity_cols]
+                    st.line_chart(chart_data.T)
+
+            st.download_button(
+                "필터링된 결과 CSV로 다운로드",
+                data=view.to_csv(index=False).encode("utf-8-sig"),
+                file_name="공모무보증_발행사_필터결과.csv", mime="text/csv"
+            )
+
+            # ------------------------------------------------------------
+            # 이력 저장 (Google Sheets 누적) — 선택사항
+            # ------------------------------------------------------------
+            st.subheader("이력 저장 (선택사항)")
+            st.caption(
+                "현재 화면에 표시된 데이터(위 필터가 적용된 상태)를 날짜와 함께 Google Sheets에 누적 저장합니다. "
+                "같은 날짜로 다시 저장하면 그 날짜 데이터만 덮어씁니다."
+            )
+            default_date = extract_date_from_filename(uploaded_file.name)
+            date_str = st.text_input("기준일자 (YYYYMMDD)", value=default_date, key="history_date")
+
+            if st.button("이력에 저장", key="save_history_btn"):
                 if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
                     st.warning(
                         "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
                         "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
                     )
+                elif not re.fullmatch(r"20\d{6}", date_str or ""):
+                    st.error("기준일자는 YYYYMMDD 8자리 숫자로 입력해주세요 (예: 20260814).")
                 else:
-                    progress = st.progress(0.0, text="일괄 저장 중...")
-                    success_count, fail_list = 0, []
-                    for i, f in enumerate(bulk_files):
-                        res, info = parse_infomax_bond_file(f)
-                        if res is None:
-                            fail_list.append(f"{f.name}: {info}")
-                        else:
-                            date_str = extract_date_from_filename(f.name)
-                            try:
-                                append_history(res, "채권스프레드_이력", date_str)
-                                success_count += 1
-                            except Exception as e:
-                                fail_list.append(f"{f.name}: 저장 오류 - {e}")
-                        progress.progress((i + 1) / len(bulk_files),
-                                           text=f"처리 중... ({i+1}/{len(bulk_files)})")
-                    progress.empty()
+                    try:
+                        with st.spinner("Google Sheets에 저장하는 중입니다..."):
+                            append_history(view, "채권스프레드_이력", date_str)
+                        st.success(f"{date_str} 기준 {len(view)}건을 이력에 저장했습니다.")
+                    except Exception as e:
+                        st.error(f"저장 중 오류가 발생했습니다: {e}")
+        else:
+            st.info("왼쪽 상단에서 인포맥스 엑셀 파일을 업로드하면 대시보드가 표시됩니다.")
 
-                    st.success(f"{success_count}/{len(bulk_files)}개 파일 저장 완료")
-                    if fail_list:
-                        st.error("다음 파일은 처리하지 못했습니다:\n" + "\n".join(fail_list))
 
-    uploaded_file = st.file_uploader(
-        "인포맥스 엑셀 파일을 업로드하세요 (예: 4788-YYYYMMDD.xlsx)", type=["xlsx", "xls"], key="infomax"
-    )
-
-    if uploaded_file is not None:
-        result, info = parse_infomax_bond_file(uploaded_file)
-        if result is None:
-            st.error(info)
-            st.stop()
-        maturity_cols = info
-        issuer_col = '발행사'
-
-        st.subheader("필터")
-        col_bt, col0, col1, col2 = st.columns(4)
-
-        with col_bt:
-            bond_type_options = sorted(result["채권종류"].dropna().unique())
-            selected_bond_types = st.multiselect(
-                "채권종류 선택", options=bond_type_options, default=bond_type_options
-            )
-
-        with col0:
-            industry_options = sorted(
-                result[result["채권종류"].isin(selected_bond_types)]["산업대분류"].unique()
-            )
-            selected_industries = st.multiselect(
-                "산업 대분류 선택", options=industry_options, default=industry_options
-            )
-
-        with col1:
-            rating_options = sorted(
-                result[
-                    result["채권종류"].isin(selected_bond_types)
-                    & result["산업대분류"].isin(selected_industries)
-                ]["신용등급그룹"].unique()
-            )
-            selected_ratings = st.multiselect(
-                "신용등급 선택", options=rating_options, default=rating_options
-            )
-
-        issuer_pool = result[
-            result["채권종류"].isin(selected_bond_types)
-            & result["산업대분류"].isin(selected_industries)
-            & result["신용등급그룹"].isin(selected_ratings)
-        ][issuer_col].sort_values().unique()
-
-        with col2:
-            selected_issuers = st.multiselect(
-                "발행사 선택 (비워두면 전체 표시)", options=issuer_pool
-            )
-
-        view = result[
-            result["채권종류"].isin(selected_bond_types)
-            & result["산업대분류"].isin(selected_industries)
-            & result["신용등급그룹"].isin(selected_ratings)
-        ]
-        if selected_issuers:
-            view = view[view[issuer_col].isin(selected_issuers)]
-
-        use_dart = st.checkbox(
-            "DART 재무제표 함께 조회 (매출액·영업이익·당기순이익 — 최초 조회 시 다소 시간 소요, 이후 캐시됨)",
-            value=False
-        )
-
-        financial_cols = ["매출액", "영업이익", "당기순이익", "재무제표기준일"]
-
-        if use_dart:
-            if not DART_API_KEY:
-                st.warning(
-                    "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud의 App settings → Secrets에 "
-                    "DART_API_KEY = \"발급받은키\" 형식으로 등록해주세요."
-                )
-            else:
-                with st.spinner("DART에서 재무제표를 조회하는 중입니다..."):
-                    corp_map = load_corp_code_map(DART_API_KEY)
-                    unique_issuers = view[issuer_col].unique().tolist()
-                    progress = st.progress(0.0, text="재무제표 조회 중...")
-                    fin_rows = []
-                    for i, name in enumerate(unique_issuers):
-                        corp_code = find_corp_code(name, corp_map)
-                        fin = fetch_financials(corp_code, DART_API_KEY)
-                        fin[issuer_col] = name
-                        fin_rows.append(fin)
-                        progress.progress((i + 1) / max(len(unique_issuers), 1),
-                                           text=f"재무제표 조회 중... ({i+1}/{len(unique_issuers)})")
-                    progress.empty()
-
-                fin_df = pd.DataFrame(fin_rows)
-                view = view.merge(fin_df, on=issuer_col, how="left")
-                other_cols = [c for c in view.columns if c not in financial_cols]
-                view = view[other_cols + ["매출액", "영업이익", "당기순이익", "재무제표기준일"]]
-
-        st.subheader(f"공모/무보증 발행사 목록 ({len(view)}개)")
-        st.dataframe(view, use_container_width=True, hide_index=True)
-
-        st.subheader("신용등급별 발행사 수")
-        counts_by_type_rating = view.groupby(["채권종류", "신용등급그룹"]).size()
-        counts_by_type_rating.index = [f"{t} {r}" for t, r in counts_by_type_rating.index]
-        st.bar_chart(counts_by_type_rating.rename("발행사 수"))
-
-        if maturity_cols:
-            st.subheader("등급별 만기별 평균 수익률 (채권종류별)")
-            st.caption("은행채·카드채·기타금융채·공모무보증은 같은 등급이라도 스프레드 수준이 달라 채권종류별로 따로 계산합니다.")
-            rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
-                             "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-"]
-            for bond_type in [c for c in bond_type_options if c in view["채권종류"].unique()]:
-                subset = view[view["채권종류"] == bond_type]
-                if subset.empty:
-                    continue
-                avg_by_rating = subset.groupby("신용등급그룹")[maturity_cols].mean().round(3)
-                ordered = [r for r in rating_order if r in avg_by_rating.index]
-                remaining = [r for r in avg_by_rating.index if r not in rating_order]
-                avg_by_rating = avg_by_rating.loc[ordered + remaining]
-                st.markdown(f"**{bond_type}**")
-                st.dataframe(avg_by_rating, use_container_width=True)
-                st.line_chart(avg_by_rating.T)
-
-        if maturity_cols:
-            st.subheader("발행사별 만기 수익률 비교")
-            pick = st.multiselect(
-                "비교할 발행사 선택 (최대 10개 추천)",
-                options=view[issuer_col].tolist(), default=view[issuer_col].tolist()[:5]
-            )
-            if pick:
-                chart_data = view[view[issuer_col].isin(pick)].set_index(issuer_col)[maturity_cols]
-                st.line_chart(chart_data.T)
-
-        st.download_button(
-            "필터링된 결과 CSV로 다운로드",
-            data=view.to_csv(index=False).encode("utf-8-sig"),
-            file_name="공모무보증_발행사_필터결과.csv", mime="text/csv"
-        )
-
-        # ------------------------------------------------------------
-        # 이력 저장 (Google Sheets 누적) — 선택사항
-        # ------------------------------------------------------------
-        st.subheader("이력 저장 (선택사항)")
+    with upload_tab2:
         st.caption(
-            "현재 화면에 표시된 데이터(위 필터가 적용된 상태)를 날짜와 함께 Google Sheets에 누적 저장합니다. "
-            "같은 날짜로 다시 저장하면 그 날짜 데이터만 덮어씁니다."
+            "한국신용평가(IS)·나이스신용평가(NICE)·한국기업평가(KR) 3개사의 등급변동 트리거 파일을 "
+            "업로드하면, 표현 방식이 달라도 하나의 표로 통합해서 보여줍니다."
         )
-        default_date = extract_date_from_filename(uploaded_file.name)
-        date_str = st.text_input("기준일자 (YYYYMMDD)", value=default_date, key="history_date")
 
-        if st.button("이력에 저장", key="save_history_btn"):
-            if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
-                st.warning(
-                    "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
-                    "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
-                )
-            elif not re.fullmatch(r"20\d{6}", date_str or ""):
-                st.error("기준일자는 YYYYMMDD 8자리 숫자로 입력해주세요 (예: 20260814).")
-            else:
-                try:
-                    with st.spinner("Google Sheets에 저장하는 중입니다..."):
-                        append_history(view, "채권스프레드_이력", date_str)
-                    st.success(f"{date_str} 기준 {len(view)}건을 이력에 저장했습니다.")
-                except Exception as e:
-                    st.error(f"저장 중 오류가 발생했습니다: {e}")
-    else:
-        st.info("왼쪽 상단에서 인포맥스 엑셀 파일을 업로드하면 대시보드가 표시됩니다.")
+        DIRECTION_MAP = {"이상": ">=", "이하": "<=", "초과": ">", "미만": "<", "상회": ">", "하회": "<"}
+        SYMBOLIC_RE = re.compile(r'^(?P<op>>=|<=|>|<)\s*(?P<val>-?\.?\d[\d,\.]*)\s*(?P<unit>%|배)?$')
+        PHRASE_RE = re.compile(r'^(?P<val>-?[\d,\.]+)\s*(?P<unit>%|배|억원|조원|만원)?\s*(?P<word>이상|이하|초과|미만|상회|하회)$')
 
+        def parse_threshold(raw):
+            if pd.isna(raw):
+                return None
+            text = str(raw).strip()
+            if text == "" or text.lower() == "n.a.":
+                return None
+            m = SYMBOLIC_RE.match(text)
+            if m:
+                val = float(m.group("val").replace(",", ""))
+                return {"연산자": m.group("op"), "값": val, "단위": m.group("unit"), "원문": text, "특이조건": None}
+            m = PHRASE_RE.match(text)
+            if m:
+                val = float(m.group("val").replace(",", ""))
+                op = DIRECTION_MAP[m.group("word")]
+                return {"연산자": op, "값": val, "단위": m.group("unit"), "원문": text, "특이조건": None}
+            return {"연산자": None, "값": None, "단위": None, "원문": text, "특이조건": text}
 
-# ==============================================================
-# TAB 2: 신용등급 변동 트리거 (3대 신평사 통합)
-# ==============================================================
-with tab2:
-    st.caption(
-        "한국신용평가(IS)·나이스신용평가(NICE)·한국기업평가(KR) 3개사의 등급변동 트리거 파일을 "
-        "업로드하면, 표현 방식이 달라도 하나의 표로 통합해서 보여줍니다."
-    )
-
-    DIRECTION_MAP = {"이상": ">=", "이하": "<=", "초과": ">", "미만": "<", "상회": ">", "하회": "<"}
-    SYMBOLIC_RE = re.compile(r'^(?P<op>>=|<=|>|<)\s*(?P<val>-?\.?\d[\d,\.]*)\s*(?P<unit>%|배)?$')
-    PHRASE_RE = re.compile(r'^(?P<val>-?[\d,\.]+)\s*(?P<unit>%|배|억원|조원|만원)?\s*(?P<word>이상|이하|초과|미만|상회|하회)$')
-
-    def parse_threshold(raw):
-        if pd.isna(raw):
+        def infer_unit(indicator_name, parsed_unit):
+            if parsed_unit:
+                return parsed_unit
+            name = str(indicator_name)
+            if "배" in name:
+                return "배"
+            if any(k in name for k in ["비율", "율", "Margin", "M/S", "ROA", "ROE"]):
+                return "%"
+            if "억원" in name:
+                return "억원"
             return None
-        text = str(raw).strip()
-        if text == "" or text.lower() == "n.a.":
-            return None
-        m = SYMBOLIC_RE.match(text)
-        if m:
-            val = float(m.group("val").replace(",", ""))
-            return {"연산자": m.group("op"), "값": val, "단위": m.group("unit"), "원문": text, "특이조건": None}
-        m = PHRASE_RE.match(text)
-        if m:
-            val = float(m.group("val").replace(",", ""))
-            op = DIRECTION_MAP[m.group("word")]
-            return {"연산자": op, "값": val, "단위": m.group("unit"), "원문": text, "특이조건": None}
-        return {"연산자": None, "값": None, "단위": None, "원문": text, "특이조건": text}
 
-    def infer_unit(indicator_name, parsed_unit):
-        if parsed_unit:
-            return parsed_unit
-        name = str(indicator_name)
-        if "배" in name:
-            return "배"
-        if any(k in name for k in ["비율", "율", "Margin", "M/S", "ROA", "ROE"]):
-            return "%"
-        if "억원" in name:
-            return "억원"
-        return None
+        st.caption(
+            "💡 회사명 표기 차이(별칭)는 이제 **'관리자 설정'** 탭에서 관리합니다. "
+            "새로운 표기 차이를 발견하시면 그 탭에서 추가해주세요."
+        )
 
-    st.caption(
-        "💡 회사명 표기 차이(별칭)는 이제 **'관리자 설정'** 탭에서 관리합니다. "
-        "새로운 표기 차이를 발견하시면 그 탭에서 추가해주세요."
-    )
+        st.markdown("**5개 파일 업로드**")
+        c1, c2 = st.columns(2)
+        with c1:
+            f_is_corp = st.file_uploader("한국신용평가(IS) — 기업부문", type=["xlsx"], key="is_corp")
+            f_is_fin = st.file_uploader("한국신용평가(IS) — 금융부문", type=["xlsx"], key="is_fin")
+            f_kr = st.file_uploader("한국기업평가(KR)", type=["xls", "xlsx"], key="kr")
+        with c2:
+            f_nice_corp = st.file_uploader("나이스신용평가(NICE) — 기업", type=["xlsx"], key="nice_corp")
+            f_nice_fin = st.file_uploader("나이스신용평가(NICE) — 금융", type=["xlsx"], key="nice_fin")
 
-    st.markdown("**5개 파일 업로드**")
-    c1, c2 = st.columns(2)
-    with c1:
-        f_is_corp = st.file_uploader("한국신용평가(IS) — 기업부문", type=["xlsx"], key="is_corp")
-        f_is_fin = st.file_uploader("한국신용평가(IS) — 금융부문", type=["xlsx"], key="is_fin")
-        f_kr = st.file_uploader("한국기업평가(KR)", type=["xls", "xlsx"], key="kr")
-    with c2:
-        f_nice_corp = st.file_uploader("나이스신용평가(NICE) — 기업", type=["xlsx"], key="nice_corp")
-        f_nice_fin = st.file_uploader("나이스신용평가(NICE) — 금융", type=["xlsx"], key="nice_fin")
+        rows = []
 
-    rows = []
-
-    # --- 한신평 기업부문 ---
-    if f_is_corp is not None:
-        try:
-            eff_date = extract_effective_date(f_is_corp, sheet_name='업체별 KMI 지표 및 실적')
-            df = pd.read_excel(f_is_corp, sheet_name='업체별 KMI 지표 및 실적', header=13)
-            up_idx = df.columns.get_loc('상향가능성')
-            latest_col = df.columns[up_idx - 1]
-            latest_label = parse_period_label(latest_col)
-            for _, r in df.iterrows():
-                issuer, indicator = r.get('업체명'), r.get('KMI 지표')
-                if pd.isna(issuer) or pd.isna(indicator):
-                    continue
-                for direction, col in [('상향', '상향가능성'), ('하향', '하향가능성')]:
-                    parsed = parse_threshold(r.get(col))
-                    if parsed is None:
-                        continue
-                    grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
-                    rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
-                                  "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
-                                  "방향": direction, **parsed,
-                                  "단위": infer_unit(indicator, parsed["단위"])})
-        except Exception as e:
-            st.error(f"한신평 기업부문 파일 처리 오류: {e}")
-
-    # --- 한신평 금융부문 ---
-    if f_is_fin is not None:
-        try:
-            eff_date = extract_effective_date(f_is_fin, sheet_name='업체별 KMI 지표 및 실적')
-            df = pd.read_excel(f_is_fin, sheet_name='업체별 KMI 지표 및 실적', header=13)
-            up_idx = df.columns.get_loc('상향가능성')
-            latest_col = df.columns[up_idx - 1]
-            latest_label = parse_period_label(latest_col)
-            for _, r in df.iterrows():
-                issuer, indicator = r.get('업체명'), r.get('KMI')
-                if pd.isna(issuer) or pd.isna(indicator) or r.get('정성/정량') != '정량':
-                    continue
-                for direction, col in [('상향', '상향가능성'), ('하향', '하향가능성')]:
-                    parsed = parse_threshold(r.get(col))
-                    if parsed is None:
-                        continue
-                    grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
-                    rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
-                                  "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
-                                  "방향": direction, **parsed,
-                                  "단위": infer_unit(indicator, parsed["단위"])})
-        except Exception as e:
-            st.error(f"한신평 금융부문 파일 처리 오류: {e}")
-
-    # --- NICE 기업/금융 (동일 구조) ---
-    for f, label in [(f_nice_corp, "NICE(기업)"), (f_nice_fin, "NICE(금융)")]:
-        if f is not None:
+        # --- 한신평 기업부문 ---
+        if f_is_corp is not None:
             try:
-                eff_date = extract_effective_date(f, sheet_name=0)
-                df = pd.read_excel(f, header=12)
-                df.columns = [str(c).strip() for c in df.columns]
-                issuer_col = df.columns[1]
-                rating_col = [c for c in df.columns if c == "'26.06"][0]
-                indicator_col = [c for c in df.columns if '트리거지표' in c][0]
-                up_col = [c for c in df.columns if '상향' in c][0]
-                down_col = [c for c in df.columns if '하향' in c][0]
-                up_idx = df.columns.get_loc(up_col)
+                eff_date = extract_effective_date(f_is_corp, sheet_name='업체별 KMI 지표 및 실적')
+                df = pd.read_excel(f_is_corp, sheet_name='업체별 KMI 지표 및 실적', header=13)
+                up_idx = df.columns.get_loc('상향가능성')
                 latest_col = df.columns[up_idx - 1]
                 latest_label = parse_period_label(latest_col)
                 for _, r in df.iterrows():
-                    issuer, indicator = r.get(issuer_col), r.get(indicator_col)
+                    issuer, indicator = r.get('업체명'), r.get('KMI 지표')
                     if pd.isna(issuer) or pd.isna(indicator):
                         continue
-                    for direction, col in [('상향', up_col), ('하향', down_col)]:
+                    for direction, col in [('상향', '상향가능성'), ('하향', '하향가능성')]:
                         parsed = parse_threshold(r.get(col))
                         if parsed is None:
                             continue
-                        grade, outlook = split_rating_outlook(r.get(rating_col), "나이스신용평가")
-                        rows.append({"신평사": "나이스신용평가", "기준일": eff_date, "원본발행사명": issuer,
+                        grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
+                        rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
                                       "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
                                       "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
                                       "방향": direction, **parsed,
                                       "단위": infer_unit(indicator, parsed["단위"])})
             except Exception as e:
-                st.error(f"{label} 파일 처리 오류: {e}")
+                st.error(f"한신평 기업부문 파일 처리 오류: {e}")
 
-    # --- 한기평(KR) ---
-    if f_kr is not None:
-        try:
-            eff_date = extract_effective_date(f_kr, sheet_name='Sheet1')
-            df = pd.read_excel(f_kr, sheet_name='Sheet1', header=25)
-            # KR은 시계열 실적 열이 상향/하향보다 뒤에 위치 (예: 2023.12, 2024.12, 2025.12, 2026.03)
-            period_candidates = [c for c in df.columns if isinstance(c, (int, float)) and c > 2000]
-            latest_col = max(period_candidates) if period_candidates else None
-            latest_label = parse_period_label(latest_col) if latest_col is not None else None
-            for _, r in df.iterrows():
-                issuer, indicator = r.get('업체명'), r.get('등급변동요인')
-                if pd.isna(issuer) or pd.isna(indicator):
-                    continue
-                for direction, col in [('상향', '상향'), ('하향', '하향')]:
-                    parsed = parse_threshold(r.get(col))
-                    if parsed is None:
+        # --- 한신평 금융부문 ---
+        if f_is_fin is not None:
+            try:
+                eff_date = extract_effective_date(f_is_fin, sheet_name='업체별 KMI 지표 및 실적')
+                df = pd.read_excel(f_is_fin, sheet_name='업체별 KMI 지표 및 실적', header=13)
+                up_idx = df.columns.get_loc('상향가능성')
+                latest_col = df.columns[up_idx - 1]
+                latest_label = parse_period_label(latest_col)
+                for _, r in df.iterrows():
+                    issuer, indicator = r.get('업체명'), r.get('KMI')
+                    if pd.isna(issuer) or pd.isna(indicator) or r.get('정성/정량') != '정량':
                         continue
-                    rows.append({"신평사": "한국기업평가", "기준일": eff_date, "원본발행사명": issuer,
-                                  "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
-                                  "등급전망": r.get('등급전망'),
-                                  "지표명": indicator,
-                                  "실제수치": r.get(latest_col) if latest_col is not None else None,
-                                  "기준월": latest_label,
-                                  "방향": direction, **parsed,
-                                  "단위": infer_unit(indicator, parsed["단위"])})
-        except Exception as e:
-            st.error(f"한기평(KR) 파일 처리 오류: {e}")
+                    for direction, col in [('상향', '상향가능성'), ('하향', '하향가능성')]:
+                        parsed = parse_threshold(r.get(col))
+                        if parsed is None:
+                            continue
+                        grade, outlook = split_rating_outlook(r.get('등급'), "한국신용평가")
+                        rows.append({"신평사": "한국신용평가", "기준일": eff_date, "원본발행사명": issuer,
+                                      "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
+                                      "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
+                                      "방향": direction, **parsed,
+                                      "단위": infer_unit(indicator, parsed["단위"])})
+            except Exception as e:
+                st.error(f"한신평 금융부문 파일 처리 오류: {e}")
 
-    if rows:
-        unified = pd.DataFrame(rows)
-        unified["충족여부"] = unified.apply(trigger_signal, axis=1)
-        st.success(f"총 {len(unified)}개 트리거 항목을 통합했습니다 (신평사 {unified['신평사'].nunique()}개사).")
-
-        date_summary = unified.groupby("신평사")["기준일"].first()
-        st.caption("신평사별 인식된 기준일: " + ", ".join(f"{k} {v}" for k, v in date_summary.items()))
-
-        period_labels = unified["기준월"].dropna().unique()
-        period_label_text = period_labels[0] if len(period_labels) > 0 else "YY.MM"
-        actual_col_name = f"실제 수치({period_label_text})"
-
-        st.subheader("발행사 검색")
-        search = st.text_input("발행사명 입력 (부분 검색 가능)", key="trigger_search")
-
-        if search:
-            hit = unified[unified["발행사(정규화)"].str.contains(search, na=False)]
-        else:
-            hit = unified
-
-        display_df = hit.copy()
-        display_df["신평사"] = display_df["신평사"].map(RATER_ABBREV).fillna(display_df["신평사"])
-        display_df = display_df.rename(columns={"실제수치": actual_col_name})
-
-        st.dataframe(
-            display_df[[
-                "원본발행사명", "발행사(정규화)", "신평사", "기준일", "등급", "등급전망",
-                "지표명", actual_col_name, "충족여부",
-                "방향", "원문", "연산자", "값", "단위", "특이조건"
-            ]],
-            use_container_width=True, hide_index=True
-        )
-
-        if search:
-            matched_names = sorted(hit["발행사(정규화)"].dropna().unique())
-            rater_count = hit.groupby("발행사(정규화)")["신평사"].nunique()
-            st.caption(
-                f"검색된 발행사: {', '.join(matched_names[:10])}"
-                + (" ..." if len(matched_names) > 10 else "")
-            )
-            for name in matched_names:
-                n_raters = rater_count.get(name, 0)
-                if n_raters < 3:
-                    st.caption(f"⚠️ '{name}': {n_raters}개 신평사에서만 발견됨 — 회사명 표기 차이로 일부가 안 잡혔을 수 있습니다.")
-
-        st.download_button(
-            "통합 트리거 결과 CSV 다운로드",
-            data=unified.to_csv(index=False).encode("utf-8-sig"),
-            file_name="신용등급_변동트리거_통합.csv", mime="text/csv"
-        )
-
-        # ------------------------------------------------------------
-        # 이력 저장 (Google Sheets 누적) — 분기 단위 기준일로 저장
-        # ------------------------------------------------------------
-        st.subheader("이력 저장 (선택사항)")
-        st.caption(
-            "각 신평사 파일 안에서 자동으로 인식한 기준일 기준으로 저장됩니다. "
-            "같은 (신평사, 기준일) 조합이 이미 있으면 그 부분만 덮어씁니다."
-        )
-        if st.button("이력에 저장", key="save_trigger_history_btn"):
-            if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
-                st.warning(
-                    "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
-                    "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
-                )
-            elif unified["기준일"].isna().any():
-                missing = unified[unified["기준일"].isna()]["신평사"].unique()
-                st.error(
-                    f"다음 신평사 파일에서 기준일을 자동으로 못 찾았습니다: {', '.join(missing)}. "
-                    "파일 형식을 확인해주세요 (기준일 저장은 건너뛰었습니다)."
-                )
-            else:
+        # --- NICE 기업/금융 (동일 구조) ---
+        for f, label in [(f_nice_corp, "NICE(기업)"), (f_nice_fin, "NICE(금융)")]:
+            if f is not None:
                 try:
-                    with st.spinner("Google Sheets에 저장하는 중입니다..."):
-                        append_history_multi(unified, "신용등급트리거_이력", dedup_cols=["신평사", "기준일"])
-                    read_history.clear()
-                    st.success(f"{len(unified)}건을 이력에 저장했습니다.")
-
-                    # 저장 직후 즉시 재조회해서 실제로 반영됐는지 앱 안에서 바로 확인
-                    verify_df = read_history("신용등급트리거_이력")
-                    if verify_df.empty:
-                        st.error(
-                            "⚠️ 저장은 오류 없이 끝났지만, 방금 다시 읽어보니 시트가 비어 있습니다. "
-                            "GOOGLE_SHEET_ID가 지금 보고 계신 시트와 다른 시트를 가리키고 있을 수 있습니다. "
-                            "Secrets의 GOOGLE_SHEET_ID 값을 다시 확인해주세요."
-                        )
-                    else:
-                        st.info(f"✅ 저장 직후 재확인: 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
-
-                    sheet_id = st.secrets.get("GOOGLE_SHEET_ID", "")
-                    if sheet_id:
-                        st.caption(
-                            f"현재 연결된 시트: https://docs.google.com/spreadsheets/d/{sheet_id}/edit "
-                            "(이 링크가 지금 보고 계신 시트와 같은지 확인해주세요)"
-                        )
+                    eff_date = extract_effective_date(f, sheet_name=0)
+                    df = pd.read_excel(f, header=12)
+                    df.columns = [str(c).strip() for c in df.columns]
+                    issuer_col = df.columns[1]
+                    rating_col = [c for c in df.columns if c == "'26.06"][0]
+                    indicator_col = [c for c in df.columns if '트리거지표' in c][0]
+                    up_col = [c for c in df.columns if '상향' in c][0]
+                    down_col = [c for c in df.columns if '하향' in c][0]
+                    up_idx = df.columns.get_loc(up_col)
+                    latest_col = df.columns[up_idx - 1]
+                    latest_label = parse_period_label(latest_col)
+                    for _, r in df.iterrows():
+                        issuer, indicator = r.get(issuer_col), r.get(indicator_col)
+                        if pd.isna(issuer) or pd.isna(indicator):
+                            continue
+                        for direction, col in [('상향', up_col), ('하향', down_col)]:
+                            parsed = parse_threshold(r.get(col))
+                            if parsed is None:
+                                continue
+                            grade, outlook = split_rating_outlook(r.get(rating_col), "나이스신용평가")
+                            rows.append({"신평사": "나이스신용평가", "기준일": eff_date, "원본발행사명": issuer,
+                                          "발행사(정규화)": normalize_issuer_name(issuer), "등급": grade, "등급전망": outlook,
+                                          "지표명": indicator, "실제수치": r.get(latest_col), "기준월": latest_label,
+                                          "방향": direction, **parsed,
+                                          "단위": infer_unit(indicator, parsed["단위"])})
                 except Exception as e:
-                    st.error(f"저장 중 오류가 발생했습니다: {e}")
-    else:
-        st.info("왼쪽에서 신평사 파일을 하나 이상 업로드하면 통합 결과가 표시됩니다.")
+                    st.error(f"{label} 파일 처리 오류: {e}")
 
+        # --- 한기평(KR) ---
+        if f_kr is not None:
+            try:
+                eff_date = extract_effective_date(f_kr, sheet_name='Sheet1')
+                df = pd.read_excel(f_kr, sheet_name='Sheet1', header=25)
+                # KR은 시계열 실적 열이 상향/하향보다 뒤에 위치 (예: 2023.12, 2024.12, 2025.12, 2026.03)
+                period_candidates = [c for c in df.columns if isinstance(c, (int, float)) and c > 2000]
+                latest_col = max(period_candidates) if period_candidates else None
+                latest_label = parse_period_label(latest_col) if latest_col is not None else None
+                for _, r in df.iterrows():
+                    issuer, indicator = r.get('업체명'), r.get('등급변동요인')
+                    if pd.isna(issuer) or pd.isna(indicator):
+                        continue
+                    for direction, col in [('상향', '상향'), ('하향', '하향')]:
+                        parsed = parse_threshold(r.get(col))
+                        if parsed is None:
+                            continue
+                        rows.append({"신평사": "한국기업평가", "기준일": eff_date, "원본발행사명": issuer,
+                                      "발행사(정규화)": normalize_issuer_name(issuer), "등급": r.get('등급'),
+                                      "등급전망": r.get('등급전망'),
+                                      "지표명": indicator,
+                                      "실제수치": r.get(latest_col) if latest_col is not None else None,
+                                      "기준월": latest_label,
+                                      "방향": direction, **parsed,
+                                      "단위": infer_unit(indicator, parsed["단위"])})
+            except Exception as e:
+                st.error(f"한기평(KR) 파일 처리 오류: {e}")
 
-# ==============================================================
-# TAB 3: 일자별 통합 조회
-# ==============================================================
-with tab3:
-    st.caption(
-        "특정 날짜를 기준으로, 그날의 채권 스프레드와 그 시점에 유효했던(가장 최근 발표된) "
-        "신용등급 변동 트리거·위너스 익스포저를 함께 보여줍니다. 이력은 Google Sheets에 미리 저장되어 있어야 합니다."
-    )
+        if rows:
+            unified = pd.DataFrame(rows)
+            unified["충족여부"] = unified.apply(trigger_signal, axis=1)
+            st.success(f"총 {len(unified)}개 트리거 항목을 통합했습니다 (신평사 {unified['신평사'].nunique()}개사).")
 
-    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
-        st.warning(
-            "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
-            "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
-        )
-    else:
+            date_summary = unified.groupby("신평사")["기준일"].first()
+            st.caption("신평사별 인식된 기준일: " + ", ".join(f"{k} {v}" for k, v in date_summary.items()))
+
+            period_labels = unified["기준월"].dropna().unique()
+            period_label_text = period_labels[0] if len(period_labels) > 0 else "YY.MM"
+            actual_col_name = f"실제 수치({period_label_text})"
+
+            st.subheader("발행사 검색")
+            search = st.text_input("발행사명 입력 (부분 검색 가능)", key="trigger_search")
+
+            if search:
+                hit = unified[unified["발행사(정규화)"].str.contains(search, na=False)]
+            else:
+                hit = unified
+
+            display_df = hit.copy()
+            display_df["신평사"] = display_df["신평사"].map(RATER_ABBREV).fillna(display_df["신평사"])
+            display_df = display_df.rename(columns={"실제수치": actual_col_name})
+
+            st.dataframe(
+                display_df[[
+                    "원본발행사명", "발행사(정규화)", "신평사", "기준일", "등급", "등급전망",
+                    "지표명", actual_col_name, "충족여부",
+                    "방향", "원문", "연산자", "값", "단위", "특이조건"
+                ]],
+                use_container_width=True, hide_index=True
+            )
+
+            if search:
+                matched_names = sorted(hit["발행사(정규화)"].dropna().unique())
+                rater_count = hit.groupby("발행사(정규화)")["신평사"].nunique()
+                st.caption(
+                    f"검색된 발행사: {', '.join(matched_names[:10])}"
+                    + (" ..." if len(matched_names) > 10 else "")
+                )
+                for name in matched_names:
+                    n_raters = rater_count.get(name, 0)
+                    if n_raters < 3:
+                        st.caption(f"⚠️ '{name}': {n_raters}개 신평사에서만 발견됨 — 회사명 표기 차이로 일부가 안 잡혔을 수 있습니다.")
+
+            st.download_button(
+                "통합 트리거 결과 CSV 다운로드",
+                data=unified.to_csv(index=False).encode("utf-8-sig"),
+                file_name="신용등급_변동트리거_통합.csv", mime="text/csv"
+            )
+
+            # ------------------------------------------------------------
+            # 이력 저장 (Google Sheets 누적) — 분기 단위 기준일로 저장
+            # ------------------------------------------------------------
+            st.subheader("이력 저장 (선택사항)")
+            st.caption(
+                "각 신평사 파일 안에서 자동으로 인식한 기준일 기준으로 저장됩니다. "
+                "같은 (신평사, 기준일) 조합이 이미 있으면 그 부분만 덮어씁니다."
+            )
+            if st.button("이력에 저장", key="save_trigger_history_btn"):
+                if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+                    st.warning(
+                        "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+                        "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+                    )
+                elif unified["기준일"].isna().any():
+                    missing = unified[unified["기준일"].isna()]["신평사"].unique()
+                    st.error(
+                        f"다음 신평사 파일에서 기준일을 자동으로 못 찾았습니다: {', '.join(missing)}. "
+                        "파일 형식을 확인해주세요 (기준일 저장은 건너뛰었습니다)."
+                    )
+                else:
+                    try:
+                        with st.spinner("Google Sheets에 저장하는 중입니다..."):
+                            append_history_multi(unified, "신용등급트리거_이력", dedup_cols=["신평사", "기준일"])
+                        read_history.clear()
+                        st.success(f"{len(unified)}건을 이력에 저장했습니다.")
+
+                        # 저장 직후 즉시 재조회해서 실제로 반영됐는지 앱 안에서 바로 확인
+                        verify_df = read_history("신용등급트리거_이력")
+                        if verify_df.empty:
+                            st.error(
+                                "⚠️ 저장은 오류 없이 끝났지만, 방금 다시 읽어보니 시트가 비어 있습니다. "
+                                "GOOGLE_SHEET_ID가 지금 보고 계신 시트와 다른 시트를 가리키고 있을 수 있습니다. "
+                                "Secrets의 GOOGLE_SHEET_ID 값을 다시 확인해주세요."
+                            )
+                        else:
+                            st.info(f"✅ 저장 직후 재확인: 시트에서 {len(verify_df)}행을 정상적으로 읽어왔습니다.")
+
+                        sheet_id = st.secrets.get("GOOGLE_SHEET_ID", "")
+                        if sheet_id:
+                            st.caption(
+                                f"현재 연결된 시트: https://docs.google.com/spreadsheets/d/{sheet_id}/edit "
+                                "(이 링크가 지금 보고 계신 시트와 같은지 확인해주세요)"
+                            )
+                    except Exception as e:
+                        st.error(f"저장 중 오류가 발생했습니다: {e}")
+        else:
+            st.info("왼쪽에서 신평사 파일을 하나 이상 업로드하면 통합 결과가 표시됩니다.")
+
+    with upload_tab3:
         with st.expander("위너스(WINUS) 익스포저 업로드"):
             st.caption("'유니버스조회' 엑셀을 업로드하면 발행사별 익스포저(투자한도·잔여한도·잔액)를 이력에 저장합니다.")
             winus_file = st.file_uploader("위너스 유니버스조회 엑셀 업로드", type=["xlsx"], key="winus_upload")
@@ -1268,108 +1279,373 @@ with tab3:
                             except Exception as e:
                                 st.error(f"저장 중 오류가 발생했습니다: {e}")
 
+# ==============================================================
+# 페이지: 채권 스프레드 (조회)
+# ==============================================================
+elif page == "채권 스프레드":
+    st.header("채권 스프레드")
+    st.caption("저장된 채권 스프레드 이력을 날짜 기준으로 조회합니다. 새 데이터는 '데이터 업로드' 메뉴에서 올려주세요.")
+
+    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+        st.warning(
+            "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+            "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+        )
+    else:
         col_a, col_b = st.columns([3, 1])
         with col_a:
-            query_date_obj = st.date_input(
-                "조회할 날짜",
-                value=datetime.date.today(),
-                format="YYYY-MM-DD",
+            q_date_obj = st.date_input(
+                "조회할 날짜", value=datetime.date.today(), format="YYYY-MM-DD", key="spread_page_date"
             )
         with col_b:
             st.write("")
             st.write("")
-            if st.button("새로고침 (최신 이력 다시 불러오기)"):
+            if st.button("새로고침", key="spread_page_refresh"):
+                read_history.clear()
+        q_date = q_date_obj.strftime("%Y%m%d")
+
+        with st.spinner("이력을 불러오는 중입니다..."):
+            spread_hist = read_history("채권스프레드_이력")
+
+        if spread_hist.empty or "업데이트일자" not in spread_hist.columns:
+            st.info("저장된 채권 스프레드 이력이 없습니다. '데이터 업로드' 메뉴에서 인포맥스 파일을 저장해주세요.")
+        else:
+            sh_all = spread_hist.copy()
+            sh_all["업데이트일자"] = sh_all["업데이트일자"].astype(str)
+            sh_valid = sh_all[sh_all["업데이트일자"] <= q_date]
+            if sh_valid.empty:
+                available_dates = sorted(sh_all["업데이트일자"].unique())
+                st.info(
+                    f"{q_date} 이전에 저장된 데이터가 없습니다. "
+                    f"저장된 날짜: {', '.join(available_dates[-10:])}"
+                    + (" ..." if len(available_dates) > 10 else "")
+                )
+            else:
+                latest_date = sh_valid["업데이트일자"].max()
+                day_spread = sh_valid[sh_valid["업데이트일자"] == latest_date]
+                if latest_date == q_date:
+                    st.caption(f"{q_date} 당일 데이터입니다. ({len(day_spread)}개 발행사)")
+                else:
+                    st.info(
+                        f"{q_date} 날짜의 데이터가 없어, 가장 가까운 이전 날짜인 "
+                        f"{latest_date} 데이터를 대신 보여드립니다. ({len(day_spread)}개 발행사)"
+                    )
+
+                st.subheader("필터")
+                col_bt, col0, col1, col2 = st.columns(4)
+
+                with col_bt:
+                    bt_opts = sorted(day_spread["채권종류"].dropna().unique()) if "채권종류" in day_spread.columns else []
+                    sel_bt = st.multiselect("채권종류 선택", options=bt_opts, default=bt_opts, key="spr_bt")
+
+                with col0:
+                    if "산업대분류" in day_spread.columns:
+                        ind_opts = sorted(day_spread[day_spread["채권종류"].isin(sel_bt)]["산업대분류"].unique())
+                    else:
+                        ind_opts = []
+                    sel_ind = st.multiselect("산업 대분류 선택", options=ind_opts, default=ind_opts, key="spr_ind")
+
+                with col1:
+                    if "신용등급그룹" in day_spread.columns:
+                        rt_opts = sorted(
+                            day_spread[
+                                day_spread["채권종류"].isin(sel_bt) & day_spread["산업대분류"].isin(sel_ind)
+                            ]["신용등급그룹"].unique()
+                        )
+                    else:
+                        rt_opts = []
+                    sel_rt = st.multiselect("신용등급 선택", options=rt_opts, default=rt_opts, key="spr_rt")
+
+                mask = (
+                    day_spread["채권종류"].isin(sel_bt)
+                    & day_spread["산업대분류"].isin(sel_ind)
+                    & day_spread["신용등급그룹"].isin(sel_rt)
+                )
+                issuer_pool = sorted(day_spread[mask]["발행사"].unique()) if "발행사" in day_spread.columns else []
+
+                with col2:
+                    sel_issuer = st.multiselect("발행사 선택 (비워두면 전체 표시)", options=issuer_pool, key="spr_issuer")
+
+                view = day_spread[mask]
+                if sel_issuer:
+                    view = view[view["발행사"].isin(sel_issuer)]
+
+                st.subheader(f"발행사 목록 ({len(view)}개)")
+                st.dataframe(view.drop(columns=["업데이트일자"]), use_container_width=True, hide_index=True, height=400)
+
+                maturity_cols = [c for c in ["3M", "6M", "9M", "1Y", "3Y", "5Y"] if c in view.columns]
+                if maturity_cols and not view.empty:
+                    st.subheader("등급별 만기별 평균 수익률 (채권종류별)")
+                    st.caption("은행채·카드채·기타금융채·공모무보증은 같은 등급이라도 스프레드 수준이 달라 채권종류별로 따로 계산합니다.")
+                    rating_order = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-",
+                                     "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-"]
+                    for bond_type in sel_bt:
+                        subset = view[view["채권종류"] == bond_type]
+                        if subset.empty:
+                            continue
+                        avg_by_rating = subset.groupby("신용등급그룹")[maturity_cols].mean().round(3)
+                        ordered = [r for r in rating_order if r in avg_by_rating.index]
+                        remaining = [r for r in avg_by_rating.index if r not in rating_order]
+                        avg_by_rating = avg_by_rating.loc[ordered + remaining]
+                        st.markdown(f"**{bond_type}**")
+                        st.dataframe(avg_by_rating, use_container_width=True)
+                        st.line_chart(avg_by_rating.T)
+
+                if not view.empty:
+                    st.download_button(
+                        "필터링된 결과 CSV로 다운로드",
+                        data=view.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"채권스프레드_{q_date}.csv", mime="text/csv"
+                    )
+
+# ==============================================================
+# 페이지: 신용등급 트리거 (조회)
+# ==============================================================
+elif page == "신용등급 트리거":
+    st.header("신용등급 트리거")
+    st.caption("저장된 신용등급 변동 트리거 이력을 날짜 기준으로 조회합니다. 새 데이터는 '데이터 업로드' 메뉴에서 올려주세요.")
+
+    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+        st.warning(
+            "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+            "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+        )
+    else:
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            q_date_obj = st.date_input(
+                "조회할 날짜", value=datetime.date.today(), format="YYYY-MM-DD", key="trigger_page_date"
+            )
+        with col_b:
+            st.write("")
+            st.write("")
+            if st.button("새로고침", key="trigger_page_refresh"):
+                read_history.clear()
+        q_date = q_date_obj.strftime("%Y%m%d")
+
+        with st.spinner("이력을 불러오는 중입니다..."):
+            trigger_hist = read_history("신용등급트리거_이력")
+
+        if trigger_hist.empty or "기준일" not in trigger_hist.columns:
+            st.info("저장된 트리거 이력이 없습니다. '데이터 업로드' 메뉴에서 신평사 파일을 저장해주세요.")
+        else:
+            th = trigger_hist.copy()
+            th["기준일"] = th["기준일"].astype(str)
+            th_valid = th[th["기준일"] <= q_date]
+            if th_valid.empty:
+                st.info(f"{q_date} 이전에 저장된 트리거 이력이 없습니다.")
+            else:
+                latest_by_rater = th_valid.groupby("신평사")["기준일"].max()
+                st.caption(
+                    "신평사별로 적용된 기준일: "
+                    + ", ".join(f"{k} ({v})" for k, v in latest_by_rater.items())
+                )
+                keep_mask = th_valid.apply(
+                    lambda row: row["기준일"] == latest_by_rater[row["신평사"]], axis=1
+                )
+                as_of_trigger = th_valid[keep_mask]
+
+                st.subheader("발행사 검색")
+                search = st.text_input("발행사명 입력 (부분 검색 가능)", key="trigger_page_search")
+
+                if search and "발행사(정규화)" in as_of_trigger.columns:
+                    hit = as_of_trigger[as_of_trigger["발행사(정규화)"].str.contains(search, na=False)]
+                else:
+                    hit = as_of_trigger
+
+                display_df = hit.copy()
+                if "신평사" in display_df.columns:
+                    display_df["신평사"] = display_df["신평사"].map(RATER_ABBREV).fillna(display_df["신평사"])
+
+                actual_col_name = "실제수치"
+                if "기준월" in display_df.columns:
+                    labels = display_df["기준월"].dropna().unique()
+                    if len(labels) > 0:
+                        actual_col_name = f"실제 수치({labels[0]})"
+
+                if "충족여부" not in display_df.columns and {"실제수치", "연산자", "값", "방향"} <= set(display_df.columns):
+                    display_df["충족여부"] = display_df.apply(trigger_signal, axis=1)
+
+                if "실제수치" in display_df.columns:
+                    display_df = display_df.rename(columns={"실제수치": actual_col_name})
+
+                show_cols = [c for c in
+                    ["원본발행사명", "발행사(정규화)", "신평사", "기준일", "등급", "등급전망",
+                     "지표명", actual_col_name, "충족여부",
+                     "방향", "원문", "연산자", "값", "단위", "특이조건"]
+                    if c in display_df.columns]
+
+                st.subheader(f"트리거 목록 ({len(display_df)}건)")
+                st.dataframe(display_df[show_cols], use_container_width=True, hide_index=True, height=400)
+
+                if search and "발행사(정규화)" in hit.columns:
+                    matched_names = sorted(hit["발행사(정규화)"].dropna().unique())
+                    rater_count = hit.groupby("발행사(정규화)")["신평사"].nunique()
+                    st.caption(
+                        f"검색된 발행사: {', '.join(matched_names[:10])}"
+                        + (" ..." if len(matched_names) > 10 else "")
+                    )
+                    for name in matched_names:
+                        n_raters = rater_count.get(name, 0)
+                        if n_raters < 3:
+                            st.caption(f"⚠️ '{name}': {n_raters}개 신평사에서만 발견됨 — 회사명 표기 차이일 수 있습니다.")
+
+                if not display_df.empty:
+                    st.download_button(
+                        "결과 CSV 다운로드",
+                        data=display_df.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"신용등급트리거_{q_date}.csv", mime="text/csv"
+                    )
+
+# ==============================================================
+# 페이지: 익스포저 (조회)
+# ==============================================================
+elif page == "익스포저":
+    st.header("익스포저")
+    st.caption("저장된 위너스(WINUS) 익스포저 이력을 날짜 기준으로 조회합니다. 새 데이터는 '데이터 업로드' 메뉴에서 올려주세요.")
+
+    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+        st.warning(
+            "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+            "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+        )
+    else:
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            q_date_obj = st.date_input(
+                "조회할 날짜", value=datetime.date.today(), format="YYYY-MM-DD", key="exposure_page_date"
+            )
+        with col_b:
+            st.write("")
+            st.write("")
+            if st.button("새로고침", key="exposure_page_refresh"):
+                read_history.clear()
+        q_date = q_date_obj.strftime("%Y%m%d")
+
+        with st.spinner("이력을 불러오는 중입니다..."):
+            winus_hist = read_history("위너스_이력")
+
+        if winus_hist.empty or "업데이트일자" not in winus_hist.columns:
+            st.info("저장된 위너스 이력이 없습니다. '데이터 업로드' 메뉴에서 위너스 파일을 저장해주세요.")
+        else:
+            wh = winus_hist.copy()
+            wh["업데이트일자"] = wh["업데이트일자"].astype(str)
+            wh_valid = wh[wh["업데이트일자"] <= q_date]
+            if wh_valid.empty:
+                available_winus_dates = sorted(wh["업데이트일자"].unique())
+                st.info(
+                    f"{q_date} 이전에 저장된 위너스 이력이 없습니다. "
+                    f"저장된 날짜: {', '.join(available_winus_dates[-10:])}"
+                    + (" ..." if len(available_winus_dates) > 10 else "")
+                )
+            else:
+                latest_winus_date = wh_valid["업데이트일자"].max()
+                as_of_winus = wh_valid[wh_valid["업데이트일자"] == latest_winus_date]
+                st.caption(f"적용된 기준일: {latest_winus_date} ({len(as_of_winus)}개 발행사)")
+
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    review_opts = sorted(as_of_winus["검토의견"].dropna().unique()) if "검토의견" in as_of_winus.columns else []
+                    sel_review = st.multiselect("검토의견 필터 (비워두면 전체)", options=review_opts, key="exp_review")
+                with col_f2:
+                    search_issuer = st.text_input("발행사명 검색", key="exp_search")
+
+                view = as_of_winus.drop(columns=["업데이트일자"])
+                if sel_review and "검토의견" in view.columns:
+                    view = view[view["검토의견"].isin(sel_review)]
+                if search_issuer and "발행사명" in view.columns:
+                    view = view[view["발행사명"].str.contains(search_issuer, na=False)]
+
+                st.subheader(f"익스포저 목록 ({len(view)}개)")
+                st.dataframe(view, use_container_width=True, hide_index=True, height=400)
+
+                if not view.empty:
+                    st.download_button(
+                        "결과 CSV 다운로드",
+                        data=view.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"위너스익스포저_{q_date}.csv", mime="text/csv"
+                    )
+
+# ==============================================================
+# 페이지: 발행사별 상세보기 (조회)
+# ==============================================================
+elif page == "발행사별 상세보기":
+    st.header("발행사별 상세 보기")
+    st.caption(
+        "특정 날짜를 기준으로, 발행사 하나를 골라 채권 스프레드·신용등급 트리거·위너스 익스포저를 한 화면에 모아 보여줍니다."
+    )
+
+    if "GOOGLE_SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
+        st.warning(
+            "Google Sheets 연동 정보가 설정되어 있지 않습니다. "
+            "Streamlit Cloud Secrets에 GOOGLE_SHEET_ID와 gcp_service_account를 등록해주세요."
+        )
+    else:
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            query_date_obj = st.date_input(
+                "조회할 날짜", value=datetime.date.today(), format="YYYY-MM-DD", key="detail_page_date"
+            )
+        with col_b:
+            st.write("")
+            st.write("")
+            if st.button("새로고침 (최신 이력 다시 불러오기)", key="detail_page_refresh"):
                 read_history.clear()
 
         query_date = query_date_obj.strftime("%Y%m%d")
 
-        if True:  # 날짜 선택기 사용으로 형식 검증이 항상 통과하므로 기존 분기 구조만 유지
-            try:
-                with st.spinner("이력을 불러오는 중입니다..."):
-                    spread_hist = read_history("채권스프레드_이력")
-                    trigger_hist = read_history("신용등급트리거_이력")
-                    winus_hist = read_history("위너스_이력")
-            except Exception as e:
-                st.error(f"이력을 불러오는 중 오류가 발생했습니다: {e}")
-                spread_hist = pd.DataFrame()
-                trigger_hist = pd.DataFrame()
-                winus_hist = pd.DataFrame()
+        with st.spinner("이력을 불러오는 중입니다..."):
+            spread_hist = read_history("채권스프레드_이력")
+            trigger_hist = read_history("신용등급트리거_이력")
+            winus_hist = read_history("위너스_이력")
 
-            # --- 그날 기준 유효한(가장 최근 저장된) 채권 스프레드 ---
-            st.subheader(f"{query_date} 시점 기준 채권 스프레드")
-            if spread_hist.empty or "업데이트일자" not in spread_hist.columns:
-                st.info("저장된 채권 스프레드 이력이 없습니다. 먼저 '채권 스프레드 대시보드' 탭에서 저장해주세요.")
+        # --- 그날 기준 유효한(가장 최근 저장된) 채권 스프레드 ---
+        if spread_hist.empty or "업데이트일자" not in spread_hist.columns:
+            day_spread = pd.DataFrame()
+        else:
+            sh_all = spread_hist.copy()
+            sh_all["업데이트일자"] = sh_all["업데이트일자"].astype(str)
+            sh_valid = sh_all[sh_all["업데이트일자"] <= query_date]
+            if sh_valid.empty:
                 day_spread = pd.DataFrame()
             else:
-                sh_all = spread_hist.copy()
-                sh_all["업데이트일자"] = sh_all["업데이트일자"].astype(str)
-                sh_valid = sh_all[sh_all["업데이트일자"] <= query_date]
-                if sh_valid.empty:
-                    available_dates = sorted(sh_all["업데이트일자"].unique())
-                    st.info(
-                        f"{query_date} 이전에 저장된 채권 스프레드 데이터가 없습니다. "
-                        f"저장된 날짜: {', '.join(available_dates[-10:])}"
-                        + (" ..." if len(available_dates) > 10 else "")
-                    )
-                    day_spread = pd.DataFrame()
-                else:
-                    latest_spread_date = sh_valid["업데이트일자"].max()
-                    day_spread = sh_valid[sh_valid["업데이트일자"] == latest_spread_date]
-                    if latest_spread_date == query_date:
-                        st.caption(f"{query_date} 당일 데이터입니다. ({len(day_spread)}개 발행사)")
-                    else:
-                        st.info(
-                            f"{query_date} 날짜의 데이터가 없어, 그 이전 중 가장 최근인 "
-                            f"{latest_spread_date} 기준 데이터를 대신 보여드립니다. ({len(day_spread)}개 발행사)"
-                        )
-                    st.dataframe(day_spread.drop(columns=["업데이트일자"]), use_container_width=True, hide_index=True)
+                latest_spread_date = sh_valid["업데이트일자"].max()
+                day_spread = sh_valid[sh_valid["업데이트일자"] == latest_spread_date]
 
-            # --- 해당 시점 기준 최신 트리거 (신평사별로 기준일 <= query_date 중 최댓값) ---
-            st.subheader(f"{query_date} 시점 기준 유효한 신용등급 변동 트리거")
-            if trigger_hist.empty or "기준일" not in trigger_hist.columns:
-                st.info("저장된 트리거 이력이 없습니다. 먼저 '신용등급 변동 트리거' 탭에서 저장해주세요.")
+        # --- 해당 시점 기준 최신 트리거 (신평사별로 기준일 <= query_date 중 최댓값) ---
+        if trigger_hist.empty or "기준일" not in trigger_hist.columns:
+            as_of_trigger = pd.DataFrame()
+        else:
+            th = trigger_hist.copy()
+            th["기준일"] = th["기준일"].astype(str)
+            th_valid = th[th["기준일"] <= query_date]
+            if th_valid.empty:
                 as_of_trigger = pd.DataFrame()
             else:
-                th = trigger_hist.copy()
-                th["기준일"] = th["기준일"].astype(str)
-                th_valid = th[th["기준일"] <= query_date]
-                if th_valid.empty:
-                    st.info(f"{query_date} 이전에 저장된 트리거 이력이 없습니다.")
-                    as_of_trigger = pd.DataFrame()
-                else:
-                    # 신평사별로 query_date 이하 중 가장 최근 기준일만 사용
-                    latest_by_rater = th_valid.groupby("신평사")["기준일"].max()
-                    st.caption(
-                        "신평사별로 적용된 기준일: "
-                        + ", ".join(f"{k} ({v})" for k, v in latest_by_rater.items())
-                    )
-                    keep_mask = th_valid.apply(
-                        lambda row: row["기준일"] == latest_by_rater[row["신평사"]], axis=1
-                    )
-                    as_of_trigger = th_valid[keep_mask]
+                latest_by_rater = th_valid.groupby("신평사")["기준일"].max()
+                keep_mask = th_valid.apply(
+                    lambda row: row["기준일"] == latest_by_rater[row["신평사"]], axis=1
+                )
+                as_of_trigger = th_valid[keep_mask]
 
-            # --- 해당 시점 기준 최신 위너스 익스포저 (query_date 이하 중 가장 최근 날짜) ---
-            st.subheader(f"{query_date} 시점 기준 위너스 익스포저 현황")
-            if winus_hist.empty or "업데이트일자" not in winus_hist.columns:
-                st.info("저장된 위너스 이력이 없습니다. 위쪽 '위너스(WINUS) 익스포저 업로드'에서 파일을 올리고 '위너스 이력에 저장'을 눌러주세요.")
+        # --- 해당 시점 기준 최신 위너스 익스포저 ---
+        if winus_hist.empty or "업데이트일자" not in winus_hist.columns:
+            as_of_winus = pd.DataFrame()
+        else:
+            wh = winus_hist.copy()
+            wh["업데이트일자"] = wh["업데이트일자"].astype(str)
+            wh_valid = wh[wh["업데이트일자"] <= query_date]
+            if wh_valid.empty:
                 as_of_winus = pd.DataFrame()
             else:
-                wh = winus_hist.copy()
-                wh["업데이트일자"] = wh["업데이트일자"].astype(str)
-                wh_valid = wh[wh["업데이트일자"] <= query_date]
-                if wh_valid.empty:
-                    available_winus_dates = sorted(wh["업데이트일자"].unique())
-                    st.info(
-                        f"{query_date} 이전에 저장된 위너스 이력이 없습니다. "
-                        f"저장된 날짜: {', '.join(available_winus_dates[-10:])}"
-                        + (" ..." if len(available_winus_dates) > 10 else "")
-                    )
-                    as_of_winus = pd.DataFrame()
-                else:
-                    latest_winus_date = wh_valid["업데이트일자"].max()
-                    as_of_winus = wh_valid[wh_valid["업데이트일자"] == latest_winus_date]
-                    st.caption(f"적용된 위너스 기준일: {latest_winus_date} ({len(as_of_winus)}개 발행사)")
+                latest_winus_date = wh_valid["업데이트일자"].max()
+                as_of_winus = wh_valid[wh_valid["업데이트일자"] == latest_winus_date]
 
+        if day_spread.empty and as_of_trigger.empty and as_of_winus.empty:
+            st.info(
+                "저장된 이력이 없습니다. '데이터 업로드' 메뉴에서 인포맥스·신평사·위너스 파일을 먼저 저장해주세요."
+            )
+        else:
             # --- 발행사 선택 목록: 채권스프레드·트리거·위너스 3개 소스를 합쳐서 구성 ---
             issuer_col_name = "발행사" if "발행사" in day_spread.columns else None
 
@@ -1388,13 +1664,12 @@ with tab3:
                     options_map.setdefault(norm, norm)
 
             if options_map:
-                st.subheader("발행사별 상세 보기")
                 st.caption(
                     "채권 스프레드·신용등급 트리거·위너스 익스포저 중 하나라도 정보가 있는 발행사는 모두 목록에 나옵니다. "
                     "일부 소스에 정보가 없으면 해당 항목에서만 '찾지 못했습니다'로 표시됩니다."
                 )
                 pick_issuer = st.selectbox(
-                    "발행사 선택", options=sorted(options_map.values())
+                    "발행사 선택", options=sorted(options_map.values()), key="detail_page_issuer"
                 )
                 if pick_issuer:
                     norm_pick = normalize_issuer_name(pick_issuer)
@@ -1413,7 +1688,7 @@ with tab3:
                     date_note = "" if spread_date_used == query_date else f" — {spread_date_used} 기준(가장 가까운 이전 데이터)"
                     st.markdown(f"**{pick_issuer} — 채권 스프레드{date_note}**")
                     if issuer_spread.empty:
-                        st.caption("이 발행사에 대한 채권 스프레드 정보를 찾지 못했습니다 (그날 공모/무보증 채권이 없었을 수 있습니다).")
+                        st.caption("이 발행사에 대한 채권 스프레드 정보를 찾지 못했습니다 (그날 해당 채권이 없었을 수 있습니다).")
                     else:
                         st.dataframe(
                             issuer_spread.drop(columns=["업데이트일자"]),
@@ -1471,11 +1746,11 @@ with tab3:
                                 use_container_width=True, hide_index=True
                             )
 
-
 # ==============================================================
-# TAB 4: 관리자 설정 (비밀번호로 잠금)
+# 페이지: 관리자 설정
 # ==============================================================
-with tab4:
+elif page == "관리자 설정":
+    st.header("관리자 설정")
     st.caption("이 탭은 발행사명 별칭 등 대시보드의 공용 설정을 관리하는 곳입니다. 비밀번호가 필요합니다.")
 
     ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "")
