@@ -531,14 +531,19 @@ def load_corp_code_map(api_key: str) -> dict:
 
 
 def find_corp_code(issuer_name: str, corp_map: dict):
-    """발행사명으로 DART corp_code를 찾는다 (정확일치 → 접미어 제거 → 부분일치 순)."""
+    """발행사명으로 DART corp_code를 찾는다 (정확일치 → 접미어 제거 → 부분일치 순).
+    부분일치 단계에서는 너무 짧은(2글자 미만) DART 등록명은 후보에서 제외한다
+    ('은' 한 글자짜리 등록명이 '~은행'을 전부 잘못 잡아채는 것 같은 오탐을 막기 위함)."""
     if issuer_name in corp_map:
         return corp_map[issuer_name]
     for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
         candidate = issuer_name.replace(suffix, "").strip()
         if candidate in corp_map:
             return corp_map[candidate]
-    candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
+    candidates = [
+        name for name in corp_map
+        if len(name) >= 3 and (issuer_name in name or name in issuer_name)
+    ]
     if len(candidates) == 1:
         return corp_map[candidates[0]]
     return None
@@ -555,7 +560,10 @@ def find_dart_name(issuer_name: str, corp_map: dict):
         candidate = issuer_name.replace(suffix, "").strip()
         if candidate in corp_map:
             return candidate
-    candidates = [name for name in corp_map if issuer_name in name or name in issuer_name]
+    candidates = [
+        name for name in corp_map
+        if len(name) >= 3 and (issuer_name in name or name in issuer_name)
+    ]
     if len(candidates) == 1:
         return candidates[0]
     return None
