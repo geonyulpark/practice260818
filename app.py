@@ -196,6 +196,44 @@ def extract_effective_date(file_obj, sheet_name=None, max_rows=30):
 # 추가/수정/삭제는 대시보드의 '관리자 설정' 탭(비밀번호 필요)에서만 가능합니다.
 ALIAS_SHEET_NAME = "발행사별칭"
 
+ALIAS_HEADER = ["별칭", "표준명", "출처"]
+ALIAS_SOURCE_OPTIONS = ["한국신용평가", "나이스신용평가", "한국기업평가", "인포맥스", "위너스(WINUS)", "DART", "기타"]
+
+
+def _get_or_migrate_alias_ws():
+    """별칭 워크시트를 열되, 기존에 '별칭','표준명' 2열짜리였다면 '출처' 열을 추가해 3열로 맞춘다."""
+    client = get_gsheet_client()
+    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+    try:
+        ws = sh.worksheet(ALIAS_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=ALIAS_SHEET_NAME, rows=1000, cols=3)
+        ws.append_row(ALIAS_HEADER)
+        return ws
+
+    values = ws.get_all_values()
+    if not values:
+        ws.append_row(ALIAS_HEADER)
+        return ws
+
+    header = values[0]
+    while header and header[-1] == "":
+        header = header[:-1]
+
+    if header != ALIAS_HEADER:
+        data_rows = values[1:]
+        migrated = []
+        for row in data_rows:
+            row_map = {header[i]: (row[i] if i < len(row) else "") for i in range(len(header))}
+            migrated.append([row_map.get(c, "") for c in ALIAS_HEADER])
+        ws.clear()
+        ws.append_row(ALIAS_HEADER)
+        if migrated:
+            ws.append_rows(migrated)
+
+    return ws
+
+
 @st.cache_data(ttl=300)
 def load_issuer_aliases() -> dict:
     """Google Sheets '발행사별칭' 탭을 읽어 {별칭: 표준명} 딕셔너리로 반환. 실패 시 빈 딕셔너리."""
@@ -226,24 +264,51 @@ def load_issuer_aliases() -> dict:
         return {}
 
 
-def add_issuer_alias(alias: str, canonical: str):
-    """새 별칭 한 행을 시트에 추가."""
-    client = get_gsheet_client()
-    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+@st.cache_data(ttl=300)
+def load_issuer_aliases_full() -> pd.DataFrame:
+    """별칭 시트를 (별칭, 표준명, 출처) 표 전체로 반환. 관리자 화면 표시용."""
     try:
-        ws = sh.worksheet(ALIAS_SHEET_NAME)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=ALIAS_SHEET_NAME, rows=500, cols=2)
-        ws.append_row(["별칭", "표준명"])
-    ws.append_row([alias, canonical])
+        client = get_gsheet_client()
+        sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+        try:
+            ws = sh.worksheet(ALIAS_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            return pd.DataFrame(columns=ALIAS_HEADER)
+        values = ws.get_all_values()
+        if not values:
+            return pd.DataFrame(columns=ALIAS_HEADER)
+        header = values[0]
+        while header and header[-1] == "":
+            header = header[:-1]
+        n = len(header)
+        data_rows = [row[:n] + [""] * (n - len(row)) for row in values[1:]]
+        return pd.DataFrame(data_rows, columns=header)
+    except Exception:
+        return pd.DataFrame(columns=ALIAS_HEADER)
+
+
+def add_issuer_alias(alias: str, canonical: str, source: str = ""):
+    """새 별칭 한 행을 시트에 추가 (출처 포함)."""
+    ws = _get_or_migrate_alias_ws()
+    ws.append_row([alias, canonical, source])
     load_issuer_aliases.clear()
+    load_issuer_aliases_full.clear()
+
+
+def add_issuer_aliases_bulk(pairs: list, source: str = ""):
+    """[(별칭, 표준명), ...] 목록을 한 번에 추가."""
+    if not pairs:
+        return
+    ws = _get_or_migrate_alias_ws()
+    rows = [[alias, canonical, source] for alias, canonical in pairs]
+    ws.append_rows(rows)
+    load_issuer_aliases.clear()
+    load_issuer_aliases_full.clear()
 
 
 def delete_issuer_alias(alias: str):
     """별칭 값이 일치하는 행을 찾아 삭제."""
-    client = get_gsheet_client()
-    sh = client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
-    ws = sh.worksheet(ALIAS_SHEET_NAME)
+    ws = _get_or_migrate_alias_ws()
     values = ws.get_all_values()
     if not values:
         return
@@ -256,6 +321,7 @@ def delete_issuer_alias(alias: str):
             ws.delete_rows(row_num)
             break
     load_issuer_aliases.clear()
+    load_issuer_aliases_full.clear()
 
 
 def normalize_issuer_name(name):
@@ -1087,25 +1153,34 @@ with tab4:
                 st.subheader("발행사명 별칭 관리")
                 st.caption(
                     "여기서 추가·삭제한 별칭은 Google Sheets에 즉시 저장되며, "
-                    "모든 사용자의 대시보드에 바로 반영됩니다 (배포/재시작 필요 없음)."
+                    "모든 사용자의 대시보드에 바로 반영됩니다 (배포/재시작 필요 없음). "
+                    "인포맥스·한국신용평가·나이스신용평가·한국기업평가·위너스(WINUS)·DART 등 "
+                    "서로 다른 소스에서 같은 회사를 다르게 표기하는 경우를 여기서 하나로 묶어 관리합니다."
                 )
 
-                aliases = load_issuer_aliases()
+                alias_full_df = load_issuer_aliases_full()
 
-                if aliases:
-                    alias_df = pd.DataFrame(
-                        [{"별칭": k, "표준명": v} for k, v in sorted(aliases.items())]
-                    )
-                    st.dataframe(alias_df, use_container_width=True, hide_index=True)
+                search_canon = st.text_input(
+                    "표준명으로 검색 (특정 회사의 모든 별칭 모아보기)", key="alias_search_canon"
+                )
+                view_df = alias_full_df
+                if search_canon and not alias_full_df.empty and "표준명" in alias_full_df.columns:
+                    view_df = alias_full_df[alias_full_df["표준명"].str.contains(search_canon, na=False)]
+
+                if not view_df.empty:
+                    st.dataframe(view_df, use_container_width=True, hide_index=True)
                 else:
-                    st.caption("등록된 별칭이 아직 없습니다.")
+                    st.caption("등록된 별칭이 아직 없습니다." if alias_full_df.empty else "검색 결과가 없습니다.")
 
-                st.markdown("**새 별칭 추가**")
-                col_x, col_y, col_z = st.columns([2, 2, 1])
+                st.markdown("---")
+                st.markdown("**새 별칭 추가 (한 개씩)**")
+                col_x, col_y, col_s, col_z = st.columns([2, 2, 2, 1])
                 with col_x:
                     new_alias = st.text_input("별칭 (파일에 나오는 표기)", key="new_alias_input")
                 with col_y:
                     new_canonical = st.text_input("표준명 (통일해서 쓸 이름)", key="new_canonical_input")
+                with col_s:
+                    new_source = st.selectbox("출처", options=ALIAS_SOURCE_OPTIONS, key="new_alias_source")
                 with col_z:
                     st.write("")
                     st.write("")
@@ -1114,12 +1189,46 @@ with tab4:
                             st.error("별칭과 표준명을 모두 입력해주세요.")
                         else:
                             try:
-                                add_issuer_alias(new_alias.strip(), new_canonical.strip())
-                                st.success(f"'{new_alias}' → '{new_canonical}' 추가되었습니다.")
+                                add_issuer_alias(new_alias.strip(), new_canonical.strip(), new_source)
+                                st.success(f"'{new_alias}' → '{new_canonical}' ({new_source}) 추가되었습니다.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"추가 중 오류가 발생했습니다: {e}")
 
+                st.markdown("**여러 개 한 번에 추가**")
+                st.caption(
+                    "한 줄에 하나씩 '별칭 = 표준명' 형식으로 입력하세요. "
+                    "같은 파일에서 한꺼번에 발견한 표기 차이를 몰아서 등록할 때 편합니다."
+                )
+                col_bulk1, col_bulk2 = st.columns([3, 1])
+                with col_bulk1:
+                    bulk_text = st.text_area(
+                        "일괄 입력", height=120,
+                        placeholder="디비증권 = DB증권\n엘지전자 = LG전자\n씨제이씨지브이 = CJ CGV",
+                        key="bulk_alias_text"
+                    )
+                with col_bulk2:
+                    bulk_source = st.selectbox("출처 (전체 적용)", options=ALIAS_SOURCE_OPTIONS, key="bulk_alias_source")
+                    st.write("")
+                    if st.button("일괄 추가", key="bulk_add_alias_btn"):
+                        pairs = []
+                        for line in (bulk_text or "").splitlines():
+                            if "=" in line:
+                                a, c = line.split("=", 1)
+                                a, c = a.strip(), c.strip()
+                                if a and c:
+                                    pairs.append((a, c))
+                        if not pairs:
+                            st.error("형식에 맞는 줄이 없습니다 ('별칭 = 표준명' 형식으로 입력해주세요).")
+                        else:
+                            try:
+                                add_issuer_aliases_bulk(pairs, bulk_source)
+                                st.success(f"{len(pairs)}개 별칭이 추가되었습니다.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"일괄 추가 중 오류가 발생했습니다: {e}")
+
+                aliases = load_issuer_aliases()
                 if aliases:
                     st.markdown("**별칭 삭제**")
                     col_p, col_q = st.columns([3, 1])
@@ -1135,3 +1244,41 @@ with tab4:
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"삭제 중 오류가 발생했습니다: {e}")
+
+                st.markdown("---")
+                st.subheader("미매칭 발행사 자동 탐지")
+                st.caption(
+                    "저장된 채권 스프레드 이력(인포맥스 발행사 목록)과 신용등급 트리거 이력(신평사별 발행사 목록)을 "
+                    "비교해서, 지금 별칭으로도 인포맥스 목록과 매칭이 안 되는 이름들을 찾아줍니다."
+                )
+                if st.button("미매칭 발행사 찾기", key="find_unmatched_btn"):
+                    with st.spinner("비교하는 중입니다..."):
+                        spread_hist_admin = read_history("채권스프레드_이력")
+                        trigger_hist_admin = read_history("신용등급트리거_이력")
+
+                    if spread_hist_admin.empty or "발행사" not in spread_hist_admin.columns:
+                        st.warning("채권 스프레드 이력이 없습니다. 먼저 인포맥스 파일을 저장해주세요.")
+                    elif trigger_hist_admin.empty or "원본발행사명" not in trigger_hist_admin.columns:
+                        st.warning("신용등급 트리거 이력이 없습니다. 먼저 트리거 파일을 저장해주세요.")
+                    else:
+                        infomax_set = set(spread_hist_admin["발행사"].dropna().unique())
+                        infomax_set_normalized = {normalize_issuer_name(n) for n in infomax_set}
+
+                        th = trigger_hist_admin.copy()
+                        th["정규화결과"] = th["원본발행사명"].apply(normalize_issuer_name)
+                        unmatched = th[~th["정규화결과"].isin(infomax_set_normalized)]
+
+                        if unmatched.empty:
+                            st.success("모든 신평사 발행사명이 인포맥스 목록과 매칭됩니다. 👍")
+                        else:
+                            summary = (
+                                unmatched.groupby(["신평사", "원본발행사명", "정규화결과"])
+                                .size().reset_index(name="건수")
+                                .sort_values(["신평사", "원본발행사명"])
+                            )
+                            st.warning(f"인포맥스 목록과 매칭되지 않는 발행사명 {len(summary)}건을 찾았습니다.")
+                            st.dataframe(summary, use_container_width=True, hide_index=True)
+                            st.caption(
+                                "위 '정규화결과' 값이 실제로는 인포맥스의 어떤 발행사명과 같은 회사인지 확인해서, "
+                                "위쪽 '새 별칭 추가'에 '정규화결과 = 인포맥스표기명' 형태로 등록해주세요."
+                            )
