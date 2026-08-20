@@ -1933,6 +1933,14 @@ elif page == "신용등급 트리거":
                         df = df.sort_values("충족건수", ascending=False)
                     return df
 
+                def style_exposure_table(df):
+                    """익스포저합계가 있는 행은 볼드체 + 옅은 음영으로 강조."""
+                    def _highlight(row):
+                        if pd.notna(row.get("익스포저합계")):
+                            return ["background-color: #FFF3CD; font-weight: bold"] * len(row)
+                        return [""] * len(row)
+                    return df.fillna("-").style.apply(_highlight, axis=1)
+
                 # 표준명(라이브 재계산)과 충족여부를 검색·목록 구성 전에 미리 확보
                 as_of_trigger["표준명"] = as_of_trigger["원본발행사명"].apply(normalize_issuer_name)
                 if "충족여부" not in as_of_trigger.columns or as_of_trigger["충족여부"].isna().all():
@@ -1983,7 +1991,10 @@ elif page == "신용등급 트리거":
                         st.session_state["trigger_show_all_up"] = True
                         st.rerun()
                 with st.expander("표로 보기"):
-                    st.dataframe(build_exposure_table(up_counts), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        style_exposure_table(build_exposure_table(up_counts)),
+                        use_container_width=False, hide_index=True
+                    )
 
                 st.markdown(f"**🔴 하향 조건 충족 ({len(down_companies_all)}개사, 충족 건수 많은 순)**")
                 st.caption("굵은 숫자 = 위너스 익스포저 데이터가 있는 발행사")
@@ -1998,7 +2009,10 @@ elif page == "신용등급 트리거":
                         st.session_state["trigger_show_all_down"] = True
                         st.rerun()
                 with st.expander("표로 보기"):
-                    st.dataframe(build_exposure_table(down_counts), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        style_exposure_table(build_exposure_table(down_counts)),
+                        use_container_width=False, hide_index=True
+                    )
 
                 # 선택된 회사가 지금 목록에 더 이상 없으면(검색어 변경 등) 선택 해제
                 if st.session_state.get("trigger_pick") and st.session_state["trigger_pick"] not in set(hit["표준명"].dropna()):
