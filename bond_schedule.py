@@ -19,7 +19,6 @@ import html
 import io
 import re
 import unicodedata
-import urllib.parse
 
 import openpyxl
 import pandas as pd
@@ -738,7 +737,7 @@ CSS = """
 .bsch-cell.out .bsch-day { color:#94a3b8; }
 .bsch-chip { display:block; font-size:.72rem; line-height:1.25; padding:2px 5px;
              margin:2px 0; border-radius:4px; color:#fff; white-space:nowrap;
-             overflow:hidden; text-overflow:ellipsis; text-decoration:none; cursor:pointer; }
+             overflow:hidden; text-overflow:ellipsis; }
 .bsch-chip.issue { background:#fff; border:1px dashed currentColor; }
 .bsch-chip .amt { opacity:.85; font-weight:400; }
 .bsch-legend { display:flex; gap:14px; flex-wrap:wrap; font-size:.78rem; color:#475569;
@@ -802,14 +801,13 @@ def month_grid(df: pd.DataFrame, year: int, month: int, show_issue: bool) -> str
                 r["만기"] or "-", fmt_amt(r["신고발행금액"]), amt,
                 r["금리밴드"] or "밴드 미정", r["대표주관"] or "-"))
             nm = html.escape(str(r["종목명"])[:11])
-            deal_id = urllib.parse.quote(str(r.name))
             if kind == "demand":
                 cls, style, label = "bsch-chip", "background:" + color, nm
             else:
                 cls, style, label = "bsch-chip issue", "color:" + color, "발행 " + nm
-            chips.append('<a class="{}" style="{}" title="{}" href="?bsch_deal={}" '
-                         'target="_self">{} <span class="amt">{}</span></a>'.format(
-                             cls, style, tip, deal_id, label, amt))
+            chips.append('<span class="{}" style="{}" title="{}">{} '
+                         '<span class="amt">{}</span></span>'.format(
+                             cls, style, tip, label, amt))
         cells.append('<div class="{}"><div class="bsch-day">{}</div>{}</div>'.format(
             klass, d.day, "".join(chips)))
         d += dt.timedelta(days=1)
@@ -825,45 +823,38 @@ def month_grid(df: pd.DataFrame, year: int, month: int, show_issue: bool) -> str
             + "⬚ 점선 = 발행일</span></div>")
 
 
-def _show_deal_dialog(st, r):
-    """캘린더에서 종목명을 클릭했을 때 뜨는 수요예측 상세 팝업.
-    '발행사별 상세보기로 이동' 버튼을 누르면 Compass의 해당 페이지로 넘어가면서
-    가능하면 그 발행사가 자동으로 선택되도록 st.session_state에 힌트를 남긴다."""
+def _render_deal_detail_body(st, r, btn_key):
+    """수요예측 상세 내용(팝업/팝오버 공용). btn_key는 '이동' 버튼의 고유 key."""
+    color = rating_color(r["신용등급"])
+    st.markdown("#### {}".format(r["종목명"]))
+    st.markdown(
+        "<span style='background:{};color:#fff;padding:2px 9px;border-radius:5px;"
+        "font-size:.85rem'>{}</span>".format(color, r["신용등급"] or "-"),
+        unsafe_allow_html=True)
+    st.write("")
 
-    @st.dialog("수요예측 상세")
-    def _popup():
-        color = rating_color(r["신용등급"])
-        st.markdown("#### {}".format(r["종목명"]))
-        st.markdown(
-            "<span style='background:{};color:#fff;padding:2px 9px;border-radius:5px;"
-            "font-size:.85rem'>{}</span>".format(color, r["신용등급"] or "-"),
-            unsafe_allow_html=True)
-        st.write("")
+    c1, c2 = st.columns(2)
+    c1.metric("수요예측일", "{:%Y-%m-%d}".format(r["수요예측일"]) if has_date(r["수요예측일"]) else "미정")
+    c2.metric("발행일", "{:%Y-%m-%d}".format(r["발행일"]) if has_date(r["발행일"]) else "미정")
+    c1.metric("신고발행금액", fmt_amt(r["신고발행금액"]))
+    c2.metric("최대발행가능액", fmt_amt(r["최대발행가능액"]))
 
-        c1, c2 = st.columns(2)
-        c1.metric("수요예측일", "{:%Y-%m-%d}".format(r["수요예측일"]) if has_date(r["수요예측일"]) else "미정")
-        c2.metric("발행일", "{:%Y-%m-%d}".format(r["발행일"]) if has_date(r["발행일"]) else "미정")
-        c1.metric("신고발행금액", fmt_amt(r["신고발행금액"]))
-        c2.metric("최대발행가능액", fmt_amt(r["최대발행가능액"]))
+    st.markdown("**만기**: {}".format(r["만기"] or "-"))
+    st.markdown("**물량**: {}".format(r["물량"] or "-"))
+    st.markdown("**금리밴드**: {}".format(r["금리밴드"] or "밴드 미정"))
+    st.markdown("**대표주관**: {}".format(r["대표주관"] or "-"))
+    st.markdown("**상태**: {}".format(r["상태"] or "-"))
+    st.markdown("**출처**: {}".format(r["출처"] or "-"))
+    if r.get("비고"):
+        st.markdown("**비고**: {}".format(r["비고"]))
 
-        st.markdown("**만기**: {}".format(r["만기"] or "-"))
-        st.markdown("**물량**: {}".format(r["물량"] or "-"))
-        st.markdown("**금리밴드**: {}".format(r["금리밴드"] or "밴드 미정"))
-        st.markdown("**대표주관**: {}".format(r["대표주관"] or "-"))
-        st.markdown("**상태**: {}".format(r["상태"] or "-"))
-        st.markdown("**출처**: {}".format(r["출처"] or "-"))
-        if r.get("비고"):
-            st.markdown("**비고**: {}".format(r["비고"]))
-
-        st.divider()
-        if st.button("발행사별 상세보기로 이동", key="bsch_goto_detail", width="stretch"):
-            # 종목명의 (신종)/(후순위) 같은 괄호 표기는 떼고 순수 회사명만 넘긴다
-            issuer_base = re.sub(r"\([^)]*\)", "", str(r["종목명"])).strip()
-            st.session_state["nav_page"] = "발행사별 상세보기"
-            st.session_state["bsch_target_issuer"] = issuer_base
-            st.rerun()
-
-    _popup()
+    st.divider()
+    if st.button("발행사별 상세보기로 이동", key=btn_key, width="stretch"):
+        # 종목명의 (신종)/(후순위) 같은 괄호 표기는 떼고 순수 회사명만 넘긴다
+        issuer_base = re.sub(r"\([^)]*\)", "", str(r["종목명"])).strip()
+        st.session_state["nav_page"] = "발행사별 상세보기"
+        st.session_state["bsch_target_issuer"] = issuer_base
+        st.rerun()
 
 
 def render_page(st, read_history):
@@ -931,14 +922,7 @@ def render_page(st, read_history):
             cal_view = cal_view[~cal_view["종목명"].astype(str).str.contains("신종", na=False)]
 
         st.markdown(month_grid(cal_view, y, m, show_issue), unsafe_allow_html=True)
-
-        # 캘린더 칩(종목명) 클릭 시 URL 쿼리파라미터(bsch_deal)로 딜을 식별해 팝업으로 상세를 보여준다.
-        clicked_id = st.query_params.get("bsch_deal")
-        if clicked_id:
-            st.query_params.pop("bsch_deal", None)  # 팝업을 닫아도 다시 안 열리도록 즉시 제거
-            _matched = cal_view[cal_view.index.astype(str) == str(clicked_id)]
-            if not _matched.empty:
-                _show_deal_dialog(st, _matched.iloc[0])
+        st.caption("칩에 마우스를 올리면 요약정보가 뜹니다. 클릭 가능한 상세보기는 아래 '⏭ 다가오는 일정' 탭에 있습니다.")
 
     with tab_list:
         show = view.sort_values(["수요예측일", "발행일"], na_position="last")
@@ -967,7 +951,7 @@ def render_page(st, read_history):
             for _, r in grp.iterrows():
                 color = rating_color(r["신용등급"])
                 with st.container(border=True):
-                    a, b = st.columns([3, 5])
+                    a, b, c = st.columns([3, 4, 1])
                     a.markdown(
                         "**{}** &nbsp;<span style='background:{};color:#fff;padding:1px 7px;"
                         "border-radius:4px;font-size:.78rem'>{}</span><br>"
@@ -983,6 +967,10 @@ def render_page(st, read_history):
                             r["물량"] or "-", r["금리밴드"] or "밴드 미정",
                             r["대표주관"] or "-"),
                         unsafe_allow_html=True)
+                    with c:
+                        st.write("")
+                        with st.popover("상세", width="stretch"):
+                            _render_deal_detail_body(st, r, btn_key="bsch_goto_{}".format(r.name))
 
 
 def render_upload_tab(st, read_history, get_client, sheet_id, alias_map=None):
