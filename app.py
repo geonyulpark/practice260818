@@ -657,7 +657,8 @@ def fetch_company_overview(corp_code: str, api_key: str):
 def fetch_market_disclosures(api_key: str, days: int = 3, max_pages: int = 15):
     """DART 공시검색(list.json)으로 최근 N일간 시장 전체 공시 목록을 페이지네이션으로 가져온다.
     회사를 특정하지 않고 시장 전체를 가져온 뒤, 우리 쪽에서 등록된 발행사만 걸러내는 방식이
-    (등록된 발행사마다 개별 조회하는 것보다) API 호출 수 측면에서 훨씬 효율적이다."""
+    (등록된 발행사마다 개별 조회하는 것보다) API 호출 수 측면에서 훨씬 효율적이다.
+    반환값: (공시 목록, 오류메시지). 정상이면 오류메시지는 None."""
     end_date = datetime.date.today()
     start_date = end_date - datetime.timedelta(days=days)
     url = "https://opendart.fss.or.kr/api/list.json"
@@ -673,16 +674,18 @@ def fetch_market_disclosures(api_key: str, days: int = 3, max_pages: int = 15):
         try:
             resp = requests.get(url, params=params, timeout=15)
             data = resp.json()
-        except Exception:
-            break
-        if data.get("status") != "000":
-            break
+        except Exception as e:
+            return all_items, f"요청 중 오류: {e}"
+        status = data.get("status")
+        if status != "000":
+            message = data.get("message", "")
+            return all_items, f"DART 응답: status={status}, message={message}"
         items = data.get("list", [])
         all_items.extend(items)
         total_page = data.get("total_page", 1)
         if page >= total_page:
             break
-    return all_items
+    return all_items, None
 
 
 @st.cache_data(ttl=60 * 60 * 24)
@@ -2245,10 +2248,12 @@ elif page == "최근공시":
                 fetch_market_disclosures.clear()
 
         with st.spinner("DART에서 최근공시를 조회하는 중입니다 (조회 기간이 길수록 오래 걸릴 수 있습니다)..."):
-            all_disclosures = fetch_market_disclosures(DART_API_KEY, days=int(days))
+            all_disclosures, fetch_err = fetch_market_disclosures(DART_API_KEY, days=int(days))
 
-        if not all_disclosures:
-            st.info("최근공시를 가져오지 못했습니다. 기간을 조정하거나 잠시 후 다시 시도해주세요.")
+        if fetch_err:
+            st.error(f"최근공시를 가져오지 못했습니다. {fetch_err}")
+        elif not all_disclosures:
+            st.info("이 기간에는 시장 전체에 공시가 없습니다 (주말·공휴일 등).")
         else:
             st.caption(f"시장 전체 공시 {len(all_disclosures)}건 중, 별칭 표에 등록된 회사만 아래에 표시합니다.")
 
