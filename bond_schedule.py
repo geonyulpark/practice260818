@@ -856,7 +856,10 @@ def _render_deal_detail_body(st, r, btn_key, popover_key=None):
             st.button("✕", key="closepop_" + btn_key, width="stretch", on_click=_close_popover)
 
     color = rating_color(r["신용등급"])
-    st.markdown("#### {}".format(r["종목명"]))
+    # h4(####)는 브라우저 기본 상단 여백이 커서, 커스텀 div로 대체해 여백을 직접 통제한다
+    st.markdown(
+        "<div style='font-size:1.15rem;font-weight:700;margin-top:0;line-height:1.3'>{}</div>".format(r["종목명"]),
+        unsafe_allow_html=True)
     st.markdown(
         "<span style='background:{};color:#fff;padding:2px 9px;border-radius:5px;"
         "font-size:.85rem'>{}</span>".format(color, r["신용등급"] or "-"),
@@ -877,22 +880,24 @@ def _render_deal_detail_body(st, r, btn_key, popover_key=None):
         _small_field("발행일", "{:%Y-%m-%d}".format(r["발행일"]) if has_date(r["발행일"]) else "미정")
         _small_field("최대발행가능액", fmt_amt(r["최대발행가능액"]))
 
+    fields = [("만기", r["만기"] or "-"), ("물량", r["물량"] or "-"), ("금리밴드", r["금리밴드"] or "밴드 미정"),
+              ("대표주관", r["대표주관"] or "-"), ("상태", r["상태"] or "-"), ("출처", r["출처"] or "-")]
+    if r.get("비고"):
+        fields.append(("비고", r["비고"]))
     st.markdown(
-        "<div style='font-size:.85rem;line-height:1.5;margin-top:6px'>"
-        "<b>만기</b>: {}<br><b>물량</b>: {}<br><b>금리밴드</b>: {}<br>"
-        "<b>대표주관</b>: {}<br><b>상태</b>: {}<br><b>출처</b>: {}{}</div>".format(
-            r["만기"] or "-", r["물량"] or "-", r["금리밴드"] or "밴드 미정",
-            r["대표주관"] or "-", r["상태"] or "-", r["출처"] or "-",
-            "<br><b>비고</b>: {}".format(r["비고"]) if r.get("비고") else ""),
+        "<div style='font-size:.85rem;margin-top:6px'>"
+        + "".join("<div style='margin-bottom:5px'><b>{}</b>: {}</div>".format(k, v) for k, v in fields)
+        + "</div>",
         unsafe_allow_html=True)
 
-    st.divider()
-    if st.button("발행사별 상세보기로 이동", key=btn_key, width="stretch"):
-        # 종목명의 (신종)/(후순위) 같은 괄호 표기는 떼고 순수 회사명만 넘긴다
-        issuer_base = re.sub(r"\([^)]*\)", "", str(r["종목명"])).strip()
-        st.session_state["nav_page"] = "발행사별 상세보기"
-        st.session_state["bsch_target_issuer"] = issuer_base
-        st.rerun()
+    _btn_col, _ = st.columns([2, 1])
+    with _btn_col:
+        if st.button("발행사별 상세보기로 이동", key=btn_key, width="stretch"):
+            # 종목명의 (신종)/(후순위) 같은 괄호 표기는 떼고 순수 회사명만 넘긴다
+            issuer_base = re.sub(r"\([^)]*\)", "", str(r["종목명"])).strip()
+            st.session_state["nav_page"] = "발행사별 상세보기"
+            st.session_state["bsch_target_issuer"] = issuer_base
+            st.rerun()
 
 
 WEEKDAYS_SUN_FIRST = ["일", "월", "화", "수", "목", "금", "토"]
@@ -943,6 +948,14 @@ div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] div[data-testid="s
 }
 div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] div[data-testid="stElementContainer"] {
     margin-bottom: 0 !important;
+}
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] h1,
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] h2,
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] h3,
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] h4,
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] p {
+    margin: 0 !important;
+    padding: 0 !important;
 }
 /* 팝업 안 닫기(X) 버튼: 테두리 제거 */
 div[class*="st-key-closepop_"] button {
