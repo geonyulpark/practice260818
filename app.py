@@ -282,8 +282,10 @@ def compute_derived_financials(long_df: pd.DataFrame) -> pd.DataFrame:
 def upload_financials_to_bigquery(long_df: pd.DataFrame, dataset_id: str = "compass_findata",
                                    table_id: str = "financial_statements"):
     """재무데이터(원본+파생, Long 포맷)를 BigQuery에 적재.
-    같은 (연도, basis) 조합이 이미 있으면 먼저 지우고 새로 넣어서, 같은 파일을 다시 올려도
-    중복되지 않게 한다 (테이블이 아직 없으면 지울 것도 없으니 조용히 넘어간다)."""
+    같은 (연도, 기간구분, 연결/별도) 조합이 이미 있으면 먼저 지우고 새로 넣어서, 같은 파일을
+    다시 올려도 중복되지 않게 한다 (테이블이 아직 없으면 지울 것도 없으니 조용히 넘어간다).
+    반드시 세 조건을 함께(AND) 봐야 한다 — 연도·basis만 보고 지우면, 예를 들어 '2025 1분기'를
+    올릴 때 이미 들어있던 '2025 결산' 데이터까지 같이 지워지는 사고가 난다."""
     client = get_bigquery_client()
     df = long_df.copy()
     df["source_file"] = "manual_upload"
@@ -291,14 +293,16 @@ def upload_financials_to_bigquery(long_df: pd.DataFrame, dataset_id: str = "comp
 
     table_ref = f"{client.project}.{dataset_id}.{table_id}"
 
-    fiscal_years = sorted(df["fiscal_year"].unique().tolist())
-    basis_list = sorted(df["basis"].unique().tolist())
-    years_sql = ",".join(str(y) for y in fiscal_years)
-    basis_sql = ",".join(f"'{b}'" for b in basis_list)
+    combos = df[["fiscal_year", "period_type", "basis"]].drop_duplicates()
+    conditions = [
+        "(fiscal_year = {} AND period_type = '{}' AND basis = '{}')".format(
+            int(row["fiscal_year"]), row["period_type"], row["basis"]
+        )
+        for _, row in combos.iterrows()
+    ]
+    where_clause = " OR ".join(conditions)
     try:
-        client.query(
-            f"DELETE FROM `{table_ref}` WHERE fiscal_year IN ({years_sql}) AND basis IN ({basis_sql})"
-        ).result()
+        client.query(f"DELETE FROM `{table_ref}` WHERE {where_clause}").result()
     except Exception:
         pass  # 테이블이 아직 없으면 지울 것도 없음 — 무시하고 아래에서 새로 만들며 적재
 
@@ -306,6 +310,27 @@ def upload_financials_to_bigquery(long_df: pd.DataFrame, dataset_id: str = "comp
     job = client.load_table_from_dataframe(df, table_ref, job_config=job_config)
     job.result()
     return len(df)
+
+
+def get_financial_statements_summary(dataset_id: str = "compass_findata", table_id: str = "financial_statements"):
+    """BigQuery financial_statements 테이블에 지금 어떤 (연도, 기간구분, 연결/별도) 조합이
+    적재되어 있는지 요약해서 가져온다. 반환값: (요약 DataFrame, 오류메시지)."""
+    client = get_bigquery_client()
+    table_ref = f"{client.project}.{dataset_id}.{table_id}"
+    query = f"""
+        SELECT fiscal_year AS 연도, period_type AS 기간구분, basis AS 연결별도,
+               COUNT(DISTINCT nice_code) AS 회사수,
+               COUNT(DISTINCT account_code) AS 계정수,
+               COUNT(*) AS 총행수,
+               MAX(loaded_at) AS 최근적재시각
+        FROM `{table_ref}`
+        GROUP BY 연도, 기간구분, 연결별도
+        ORDER BY 연도 DESC, 기간구분, 연결별도
+    """
+    try:
+        return client.query(query).to_dataframe(), None
+    except Exception as e:
+        return None, f"조회 중 오류가 발생했습니다: {e}"
 
 
 def append_history(df: pd.DataFrame, worksheet_name: str, date_str: str, date_col: str = "업데이트일자"):
@@ -3440,47 +3465,55 @@ elif page == "관리자 설정":
             "계정마다 한 행씩(세로형)으로 바꾸고 총차입금·순차입금·EBITDA·금융비용·Capex·당기순이익 같은 "
             "파생 계정까지 계산해서 BigQuery `financial_statements` 테이블에 적재합니다. "
             "연결/별도는 계정(열)마다 헤더의 '(연결)' 표시 유무로 자동 판단합니다 — 표시가 있으면 연결, "
-            "없으면 별도입니다. 같은 (연도, 연결/별도) 조합을 다시 올리면 기존 것을 지우고 새로 넣어서 "
-            "중복되지 않습니다."
+            "없으면 별도입니다. 같은 (연도, 기간구분, 연결/별도) 조합을 다시 올리면 기존 것을 지우고 "
+            "새로 넣어서 중복되지 않습니다. **여러 파일을 한 번에 선택**해서 순서대로 처리할 수 있습니다."
         )
-        vs_fin_file = st.file_uploader(
-            "VALUESearch 재무데이터 엑셀 업로드", type=["xlsx"], key="vs_fin_upload"
+        vs_fin_files = st.file_uploader(
+            "VALUESearch 재무데이터 엑셀 업로드 (여러 개 선택 가능)", type=["xlsx"],
+            accept_multiple_files=True, key="vs_fin_upload"
         )
-        if vs_fin_file is not None:
-            vs_fin_parsed, vs_fin_err, vs_fin_unmatched = parse_valuesearch_financials_wide(vs_fin_file)
-            if vs_fin_err:
-                st.error(vs_fin_err)
-            else:
-                if vs_fin_unmatched:
-                    st.warning(
-                        f"⚠️ 헤더 형식을 인식하지 못해 건너뛴 열이 {len(vs_fin_unmatched)}개 있습니다 "
-                        "(계정 데이터가 아니거나, 예상과 다른 표기일 수 있습니다):\n\n"
-                        + ", ".join(vs_fin_unmatched[:20]) + (" ..." if len(vs_fin_unmatched) > 20 else "")
-                    )
-                years_found = sorted(vs_fin_parsed["fiscal_year"].unique().tolist())
-                periods_found = sorted(vs_fin_parsed["period_type"].unique().tolist())
-                basis_found = sorted(vs_fin_parsed["basis"].unique().tolist())
-                accounts_found = vs_fin_parsed["account_code"].nunique()
-                st.caption(
-                    f"파싱 결과: {len(vs_fin_parsed):,}행 · 연도 {years_found} · 기간구분 {periods_found} · "
-                    f"연결/별도 자동판단 결과 {basis_found} · 계정 {accounts_found}종"
-                )
-                if st.button("파생 계정 계산 + BigQuery 적재", key="vs_fin_upload_btn"):
-                    with st.spinner("총차입금·EBITDA 등 파생 계정을 계산하는 중입니다..."):
-                        full_df = compute_derived_financials(vs_fin_parsed)
-                    st.caption(f"원본 {len(vs_fin_parsed):,}행 + 파생 계정 포함 총 {len(full_df):,}행")
-
-                    with st.spinner(f"BigQuery에 {len(full_df):,}행을 적재하는 중입니다 (다소 걸릴 수 있습니다)..."):
+        if vs_fin_files:
+            st.caption(f"{len(vs_fin_files)}개 파일이 선택되었습니다.")
+            if st.button(f"전체 {len(vs_fin_files)}개 파일 처리 + BigQuery 적재", key="vs_fin_upload_btn"):
+                total_loaded = 0
+                for f in vs_fin_files:
+                    with st.status(f"{f.name} 처리 중...", expanded=True) as status:
+                        parsed, err, unmatched = parse_valuesearch_financials_wide(f)
+                        if err:
+                            status.update(label=f"❌ {f.name}: {err}", state="error")
+                            continue
+                        if unmatched:
+                            st.warning(
+                                f"⚠️ 헤더 형식을 인식하지 못해 건너뛴 열이 {len(unmatched)}개 있습니다: "
+                                + ", ".join(unmatched[:10]) + (" ..." if len(unmatched) > 10 else "")
+                            )
+                        years_found = sorted(parsed["fiscal_year"].unique().tolist())
+                        periods_found = sorted(parsed["period_type"].unique().tolist())
+                        basis_found = sorted(parsed["basis"].unique().tolist())
+                        st.write(
+                            f"연도 {years_found} · 기간구분 {periods_found} · "
+                            f"연결/별도 {basis_found} · 원본 {len(parsed):,}행"
+                        )
+                        full_df = compute_derived_financials(parsed)
+                        st.write(f"파생 계정 포함 총 {len(full_df):,}행 → BigQuery 적재 중...")
                         try:
                             n_loaded = upload_financials_to_bigquery(full_df)
-                            st.success(f"BigQuery `financial_statements` 테이블에 {n_loaded:,}행을 적재했습니다.")
+                            total_loaded += n_loaded
+                            status.update(label=f"✅ {f.name}: {n_loaded:,}행 적재 완료", state="complete")
                         except Exception as e:
-                            st.error(
-                                f"BigQuery 적재 중 오류가 발생했습니다: {e}\n\n"
-                                "`financial_statements` 테이블이 아직 없으면 처음엔 자동으로 만들어지지만, "
-                                "미리 설계해둔 파티션·클러스터링까지 적용하려면 BigQuery 콘솔에서 "
-                                "CREATE TABLE DDL을 먼저 실행해두시는 걸 추천드립니다."
-                            )
+                            status.update(label=f"❌ {f.name}: BigQuery 적재 실패 — {e}", state="error")
+                st.success(f"전체 파일 처리 완료 — 총 {total_loaded:,}행 적재했습니다.")
+
+        st.markdown("###### 지금 BigQuery에 적재된 재무데이터 현황")
+        if st.button("적재 현황 조회", key="vs_fin_status_btn"):
+            with st.spinner("BigQuery에서 현황을 조회하는 중입니다..."):
+                summary_df, summary_err = get_financial_statements_summary()
+            if summary_err:
+                st.error(summary_err)
+            elif summary_df is None or summary_df.empty:
+                st.info("아직 적재된 재무데이터가 없습니다.")
+            else:
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.subheader("미매칭 발행사 자동 탐지")
