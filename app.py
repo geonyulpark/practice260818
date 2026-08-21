@@ -333,6 +333,63 @@ def get_financial_statements_summary(dataset_id: str = "compass_findata", table_
         return None, f"조회 중 오류가 발생했습니다: {e}"
 
 
+def create_financial_ratios_view(dataset_id: str = "compass_findata",
+                                  statements_table: str = "financial_statements",
+                                  view_name: str = "financial_ratios"):
+    """financial_statements(원본+파생 계정, Long 포맷)를 피벗해서 실제 재무비율을 계산하는
+    BigQuery 뷰를 만든다(이미 있으면 갱신). 뷰라서 원본 테이블에 새 연도/분기가 추가되는 즉시
+    자동으로 반영된다 — 따로 다시 만들 필요가 없다.
+    이자보상배율은 EBITDA를, 분모는 순수 이자 성격의 이자비용+사채이자만 쓴다(매출채권처분손실·
+    상환우선주배당금 등 나머지 금융비용 항목은 성격이 달라 분모에서 제외)."""
+    client = get_bigquery_client()
+    statements_ref = f"{client.project}.{dataset_id}.{statements_table}"
+    view_ref = f"{client.project}.{dataset_id}.{view_name}"
+
+    ddl = f"""
+    CREATE OR REPLACE VIEW `{view_ref}` AS
+    WITH pivoted AS (
+      SELECT
+        nice_code, corp_name, fiscal_year, period_type, basis,
+        MAX(IF(account_code = '115000', amount, NULL)) AS `자산총계`,
+        MAX(IF(account_code = '118000', amount, NULL)) AS `부채총계`,
+        MAX(IF(account_code = '118900', amount, NULL)) AS `자본총계`,
+        MAX(IF(account_code = '112000', amount, NULL)) AS `유동자산`,
+        MAX(IF(account_code = '116000', amount, NULL)) AS `유동부채`,
+        MAX(IF(account_code = '121000', amount, NULL)) AS `매출액`,
+        MAX(IF(account_code = '125000', amount, NULL)) AS `영업이익`,
+        MAX(IF(account_code = '126110', amount, NULL)) AS `이자비용`,
+        MAX(IF(account_code = '126120', amount, NULL)) AS `사채이자`,
+        MAX(IF(account_code = 'D_당기순이익', amount, NULL)) AS `당기순이익`,
+        MAX(IF(account_code = 'D_EBITDA', amount, NULL)) AS EBITDA,
+        MAX(IF(account_code = 'D_총차입금', amount, NULL)) AS `총차입금`,
+        MAX(IF(account_code = 'D_순차입금', amount, NULL)) AS `순차입금`
+      FROM `{statements_ref}`
+      GROUP BY nice_code, corp_name, fiscal_year, period_type, basis
+    ),
+    with_growth AS (
+      SELECT *,
+        LAG(`매출액`) OVER (
+          PARTITION BY nice_code, period_type, basis ORDER BY fiscal_year
+        ) AS `전년동기매출액`
+      FROM pivoted
+    )
+    SELECT
+      *,
+      SAFE_DIVIDE(EBITDA, `이자비용` + IFNULL(`사채이자`, 0)) AS `이자보상배율`,
+      SAFE_DIVIDE(`순차입금`, EBITDA) AS `순차입금_EBITDA배율`,
+      SAFE_DIVIDE(`부채총계`, `자본총계`) * 100 AS `부채비율`,
+      SAFE_DIVIDE(`총차입금`, `자산총계`) * 100 AS `차입금의존도`,
+      SAFE_DIVIDE(`유동자산`, `유동부채`) * 100 AS `유동비율`,
+      SAFE_DIVIDE(`영업이익`, `매출액`) * 100 AS `영업이익률`,
+      SAFE_DIVIDE(`당기순이익`, `매출액`) * 100 AS `순이익률`,
+      SAFE_DIVIDE(`당기순이익`, `자본총계`) * 100 AS ROE,
+      SAFE_DIVIDE(`매출액` - `전년동기매출액`, `전년동기매출액`) * 100 AS `매출액증가율`
+    FROM with_growth
+    """
+    client.query(ddl).result()
+    return view_ref
+
+
 def append_history(df: pd.DataFrame, worksheet_name: str, date_str: str, date_col: str = "업데이트일자"):
     """df를 지정한 워크시트에 날짜열과 함께 이력으로 쌓는다.
     같은 날짜(date_str) 데이터가 이미 있으면 먼저 지우고 새로 씀 (재업로드시 중복 방지)."""
@@ -3514,6 +3571,34 @@ elif page == "관리자 설정":
                 st.info("아직 적재된 재무데이터가 없습니다.")
             else:
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("재무비율 뷰 생성/갱신")
+        st.caption(
+            "`financial_statements`의 원본·파생 계정을 다시 피벗해서, 이자보상배율·순차입금/EBITDA·"
+            "부채비율·차입금의존도·유동비율·영업이익률·순이익률·ROE·매출액증가율을 계산하는 "
+            "BigQuery 뷰(`financial_ratios`)를 만듭니다. 뷰라서 새 연도/분기를 적재해도 자동으로 "
+            "반영되고, 다시 누를 때마다 최신 정의로 갱신(CREATE OR REPLACE)됩니다."
+        )
+        if st.button("financial_ratios 뷰 생성/갱신", key="create_ratios_view_btn"):
+            with st.spinner("뷰를 생성하는 중입니다..."):
+                try:
+                    view_ref = create_financial_ratios_view()
+                    st.success(f"뷰를 생성/갱신했습니다: `{view_ref}`")
+                except Exception as e:
+                    st.error(f"뷰 생성 중 오류가 발생했습니다: {e}")
+
+        if st.button("financial_ratios 뷰 미리보기 (상위 20건)", key="preview_ratios_view_btn"):
+            with st.spinner("조회하는 중입니다..."):
+                try:
+                    client = get_bigquery_client()
+                    preview_df = client.query(
+                        "SELECT * FROM `{}.compass_findata.financial_ratios` "
+                        "ORDER BY fiscal_year DESC LIMIT 20".format(client.project)
+                    ).to_dataframe()
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.error(f"미리보기 조회 중 오류가 발생했습니다: {e} (먼저 위 버튼으로 뷰를 생성해주세요)")
 
         st.markdown("---")
         st.subheader("미매칭 발행사 자동 탐지")
