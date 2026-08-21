@@ -873,19 +873,36 @@ WEEKDAYS_SUN_FIRST = ["일", "월", "화", "수", "목", "금", "토"]
 
 _CAL_CSS = """
 <style>
-/* 캘린더 영역: 각진 모서리, 칸 사이 간격 제거, 버튼 왼쪽정렬 */
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+/* 날짜 칸: 각진 모서리, 얇은 격자선, 내용에 맞춰 자동으로 늘어남(고정 높이 없음) */
+div[class*="st-key-calday_"] {
     border-radius: 0 !important;
-    border-color: #d0d5dd !important;
+    border: 1px solid #d0d5dd !important;
+    padding: 6px 8px !important;
 }
-[data-testid="stMain"] [data-testid="stHorizontalBlock"] {
+/* 요일/날짜 칸이 나열되는 가로줄 자체의 칸 사이 간격 제거 */
+[data-testid="stHorizontalBlock"] {
     gap: 0 !important;
 }
-[data-testid="stMain"] div[data-testid="stPopover"] button,
-[data-testid="stMain"] div[data-testid="stPopover"] button p {
-    border-radius: 0 !important;
+/* 발행사 칩(팝오버 트리거) 버튼: 테두리 제거, 왼쪽정렬, 밀도 있게 */
+div[class*="st-key-calpop_"] button {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
     text-align: left !important;
     justify-content: flex-start !important;
+    padding: 1px 4px !important;
+    min-height: 1.6rem !important;
+    font-size: .82rem !important;
+}
+div[class*="st-key-calpop_"] button p {
+    text-align: left !important;
+}
+/* 팝오버 트리거들 사이 위아래 간격을 좁힘 */
+div[class*="st-key-calday_"] div[data-testid="stPopover"] {
+    margin-bottom: 0 !important;
+}
+div[class*="st-key-calday_"] div[data-testid="stElementContainer"] {
+    margin-bottom: 0 !important;
 }
 </style>
 """
@@ -895,7 +912,9 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
     """st.columns + st.popover로 그리는 네이티브 캘린더.
     칩(버튼)을 클릭하면 새로고침 없이 그 옆에 상세 팝업이 뜬다.
     HTML 그리드(month_grid)보다는 성기지만, 클릭 상호작용이 필요해 이 방식을 쓴다.
-    일요일이 첫 열이다."""
+    일요일이 첫 열이다. 날짜 칸은 고정 높이가 없어서, 일정이 많은 주는 그 줄 전체가
+    자연스럽게(같은 줄의 7칸이 함께) 늘어난다 — Streamlit의 flex 레이아웃이 같은 줄
+    칸들의 높이를 자동으로 맞춰주기 때문에 스크롤바 없이 해결된다."""
     st.markdown(_CAL_CSS, unsafe_allow_html=True)
 
     first = dt.date(year, month, 1)
@@ -925,7 +944,7 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
         for i in range(7):
             day = d + dt.timedelta(days=i)
             with cols[i]:
-                with st.container(border=True, height=150):
+                with st.container(border=True, key="calday_{}".format(day.isoformat())):
                     if day == today:
                         st.markdown(":orange[**{}**]".format(day.day))
                     elif day.month != month:
@@ -943,7 +962,7 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
                         nm = str(r["종목명"])[:8]
                         label = "{}{} {}".format("📤" if kind == "issue" else "", emoji, nm)
                         pop_key = "cal_{}_{}_{}".format(day.isoformat(), kind, r.name)
-                        with st.popover(label, width="stretch"):
+                        with st.popover(label, width="stretch", key="calpop_{}".format(pop_key)):
                             st.caption(amt)
                             _render_deal_detail_body(st, r, btn_key="goto_" + pop_key)
         d += dt.timedelta(days=7)
