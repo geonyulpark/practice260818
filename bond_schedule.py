@@ -843,23 +843,28 @@ def _noop_popover_change():
 
 def _render_deal_detail_body(st, r, btn_key, popover_key=None):
     """수요예측 상세 내용(팝업/팝오버 공용). btn_key는 '이동' 버튼의 고유 key.
-    popover_key를 주면 우측 상단에 닫기(X) 버튼이 뜨고, 누르면 그 팝오버를 닫는다.
+    popover_key를 주면 발행사명 오른쪽 가장자리에 닫기(X) 버튼이 뜨고, 누르면 그 팝오버를 닫는다.
     st.session_state[popover_key]는 위젯이 이미 그려진 뒤에는 직접 대입할 수 없어서
     (StreamlitAPIException), on_click 콜백 안에서 처리한다 — 콜백은 다음 스크립트
     실행 전에 미리 처리되므로 이 제약을 받지 않는다."""
+    color = rating_color(r["신용등급"])
+
     if popover_key:
         def _close_popover():
             st.session_state[popover_key] = False
 
-        _spacer, xcol = st.columns([9, 1])
+        name_col, xcol = st.columns([5, 1])
+        with name_col:
+            st.markdown(
+                "<div style='font-size:1.15rem;font-weight:700;margin:0;line-height:1.3'>{}</div>".format(r["종목명"]),
+                unsafe_allow_html=True)
         with xcol:
             st.button("✕", key="closepop_" + btn_key, width="stretch", on_click=_close_popover)
+    else:
+        st.markdown(
+            "<div style='font-size:1.15rem;font-weight:700;margin:0;line-height:1.3'>{}</div>".format(r["종목명"]),
+            unsafe_allow_html=True)
 
-    color = rating_color(r["신용등급"])
-    # h4(####)는 브라우저 기본 상단 여백이 커서, 커스텀 div로 대체해 여백을 직접 통제한다
-    st.markdown(
-        "<div style='font-size:1.15rem;font-weight:700;margin-top:0;line-height:1.3'>{}</div>".format(r["종목명"]),
-        unsafe_allow_html=True)
     st.markdown(
         "<span style='background:{};color:#fff;padding:2px 9px;border-radius:5px;"
         "font-size:.85rem'>{}</span>".format(color, r["신용등급"] or "-"),
@@ -890,7 +895,7 @@ def _render_deal_detail_body(st, r, btn_key, popover_key=None):
         + "</div>",
         unsafe_allow_html=True)
 
-    _btn_col, _ = st.columns([2, 1])
+    _, _btn_col, _ = st.columns([1, 2, 1])
     with _btn_col:
         if st.button("발행사별 상세보기로 이동", key=btn_key, width="stretch"):
             # 종목명의 (신종)/(후순위) 같은 괄호 표기는 떼고 순수 회사명만 넘긴다
@@ -904,10 +909,10 @@ WEEKDAYS_SUN_FIRST = ["일", "월", "화", "수", "목", "금", "토"]
 
 _CAL_CSS = """
 <style>
-/* 날짜 칸: 테두리 완전 제거, 정사각형에 가깝도록 최소 높이 부여, 내용 많으면 자동으로 더 늘어남 */
+/* 날짜 칸: 가로·세로 격자선(각 칸에 얇은 테두리), 정사각형에 가깝도록 최소 높이 부여 */
 div[class*="st-key-calday_"] {
     border-radius: 0 !important;
-    border: none !important;
+    border: 1px solid #d0d5dd !important;
     padding: 6px 8px !important;
     min-height: 100px !important;
 }
@@ -937,11 +942,15 @@ div[class*="st-key-calday_"] div[data-testid="stPopover"],
 div[class*="st-key-calday_"] div[data-testid="stElementContainer"] {
     margin-bottom: 0 !important;
 }
-/* 발행사 클릭 시 뜨는 상세 팝업 패널: 더 작게, 내부 여백도 좁혀서 밀도 있게 */
+/* 캘린더 전체: 창이 넓어져도 가로 폭이 무한정 늘어나지 않도록 상한을 둠 */
+div[class*="st-key-calgrid_wrap"] {
+    max-width: 900px !important;
+}
+/* 발행사 클릭 시 뜨는 상세 팝업 패널: 더 작게, 상단 여백도 최소화해서 밀도 있게 */
 div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] {
     width: 200px !important;
     max-width: 200px !important;
-    padding: 10px 12px !important;
+    padding: 6px 10px 10px !important;
 }
 div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] {
     gap: 2px !important;
@@ -993,7 +1002,9 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
     HTML 그리드(month_grid)보다는 성기지만, 클릭 상호작용이 필요해 이 방식을 쓴다.
     일요일이 첫 열이다. 날짜 칸은 고정 높이가 없어서, 일정이 많은 주는 그 줄 전체가
     자연스럽게(같은 줄의 7칸이 함께) 늘어난다 — Streamlit의 flex 레이아웃이 같은 줄
-    칸들의 높이를 자동으로 맞춰주기 때문에 스크롤바 없이 해결된다."""
+    칸들의 높이를 자동으로 맞춰주기 때문에 스크롤바 없이 해결된다.
+    캘린더 전체를 key가 있는 컨테이너로 감싸서, 창이 아무리 넓어져도 가로 폭이
+    무한정 늘어나지 않도록 CSS로 상한을 둔다."""
     st.markdown(_CAL_CSS, unsafe_allow_html=True)
 
     first = dt.date(year, month, 1)
@@ -1010,42 +1021,42 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
         if show_issue and has_date(r["발행일"]):
             by_day.setdefault(r["발행일"], []).append(("issue", r))
 
-    head_cols = st.columns(7)
-    for i, w in enumerate(WEEKDAYS_SUN_FIRST):
-        color = "#dc2626" if i == 0 else "#2563eb" if i == 6 else "#475569"
-        head_cols[i].markdown(
-            "<div style='text-align:center;font-weight:600;font-size:.82rem;color:{}'>{}</div>".format(color, w),
-            unsafe_allow_html=True)
+    with st.container(key="calgrid_wrap"):
+        head_cols = st.columns(7)
+        for i, w in enumerate(WEEKDAYS_SUN_FIRST):
+            color = "#dc2626" if i == 0 else "#2563eb" if i == 6 else "#475569"
+            head_cols[i].markdown(
+                "<div style='text-align:center;font-weight:600;font-size:.82rem;color:{}'>{}</div>".format(color, w),
+                unsafe_allow_html=True)
 
-    d = start
-    while d <= end:
-        cols = st.columns(7)
-        for i in range(7):
-            day = d + dt.timedelta(days=i)
-            with cols[i]:
-                with st.container(border=True, key="calday_{}".format(day.isoformat())):
-                    if day == today:
-                        st.markdown(":orange[**{}**]".format(day.day))
-                    elif day.month != month:
-                        st.caption(str(day.day))
-                    else:
-                        st.markdown("**{}**".format(day.day))
+        d = start
+        while d <= end:
+            cols = st.columns(7)
+            for i in range(7):
+                day = d + dt.timedelta(days=i)
+                with cols[i]:
+                    with st.container(border=True, key="calday_{}".format(day.isoformat())):
+                        if day == today:
+                            st.markdown(":orange[**{}**]".format(day.day))
+                        elif day.month != month:
+                            st.caption(str(day.day))
+                        else:
+                            st.markdown("**{}**".format(day.day))
 
-                    events = sorted(
-                        by_day.get(day, []),
-                        key=lambda x: (x[0] != "demand", str(x[1]["종목명"]))
-                    )
-                    for kind, r in events:
-                        emoji = rating_emoji(r["신용등급"])
-                        amt = fmt_amt(r["최대발행가능액"])
-                        nm = str(r["종목명"])[:8]
-                        label = "{}{} {}".format("📤" if kind == "issue" else "", emoji, nm)
-                        pop_key = "cal_{}_{}_{}".format(day.isoformat(), kind, r.name)
-                        pop_key_full = "calpop_{}".format(pop_key)
-                        with st.popover(label, width="stretch", key=pop_key_full, on_change=_noop_popover_change):
-                            st.caption(amt)
-                            _render_deal_detail_body(st, r, btn_key="goto_" + pop_key, popover_key=pop_key_full)
-        d += dt.timedelta(days=7)
+                        events = sorted(
+                            by_day.get(day, []),
+                            key=lambda x: (x[0] != "demand", str(x[1]["종목명"]))
+                        )
+                        for kind, r in events:
+                            emoji = rating_emoji(r["신용등급"])
+                            amt = fmt_amt(r["최대발행가능액"])
+                            nm = str(r["종목명"])[:8]
+                            label = "{}{} {}".format("📤" if kind == "issue" else "", emoji, nm)
+                            pop_key = "cal_{}_{}_{}".format(day.isoformat(), kind, r.name)
+                            pop_key_full = "calpop_{}".format(pop_key)
+                            with st.popover(label, width="stretch", key=pop_key_full, on_change=_noop_popover_change):
+                                _render_deal_detail_body(st, r, btn_key="goto_" + pop_key, popover_key=pop_key_full)
+            d += dt.timedelta(days=7)
 
     st.markdown(
         "<div style='display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;"
