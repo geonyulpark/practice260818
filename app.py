@@ -2553,192 +2553,201 @@ elif page == "발행사별 상세보기":
                     if not DART_API_KEY:
                         st.caption("DART API 키가 설정되어 있지 않아 이 정보를 조회할 수 없습니다.")
                     else:
-                        # 1) corp_code 확보: 별칭 표에 저장된 법인고유번호를 우선 사용 (빠르고 정확함)
-                        corp_code = None
-                        alias_full_for_detail = load_issuer_aliases_full()
-                        if (
-                            not alias_full_for_detail.empty
-                            and "표준명" in alias_full_for_detail.columns
-                            and "법인고유번호" in alias_full_for_detail.columns
-                        ):
-                            match_row = alias_full_for_detail[alias_full_for_detail["표준명"] == norm_pick]
-                            if not match_row.empty:
-                                stored_code = str(match_row.iloc[0]["법인고유번호"]).strip()
-                                if stored_code:
-                                    corp_code = stored_code
+                        st.caption(
+                            "⚠️ 재무제표 상세 조회는 한 번에 최대 15회 정도 DART를 호출합니다. "
+                            "요청 과다로 인한 일시적 차단을 막기 위해 버튼을 눌러야 조회됩니다."
+                        )
+                        run_dart_detail = st.button("DART에서 기업개황·재무제표 조회", key="dart_detail_fetch_btn")
 
-                        # 2) 별칭 표에 없으면 DART 전체 목록에서 실시간 매칭
-                        if not corp_code:
-                            with st.spinner("DART에서 기업 코드를 찾는 중입니다..."):
-                                corp_map = load_corp_code_map(DART_API_KEY)
-                                corp_code = find_corp_code(pick_issuer, corp_map) or find_corp_code(norm_pick, corp_map)
-
-                        if not corp_code:
-                            st.caption(
-                                "DART에서 이 발행사의 기업 코드를 찾지 못했습니다. "
-                                "관리자 탭에서 법인고유번호를 직접 등록해두시면 더 정확하게 찾을 수 있습니다."
-                            )
+                        if not run_dart_detail:
+                            st.caption("버튼을 누르면 아래에 결과가 표시됩니다.")
                         else:
-                            with st.spinner("DART에서 기업개황을 조회하는 중입니다..."):
-                                overview = fetch_company_overview(corp_code, DART_API_KEY)
+                            # 1) corp_code 확보: 별칭 표에 저장된 법인고유번호를 우선 사용 (빠르고 정확함)
+                            corp_code = None
+                            alias_full_for_detail = load_issuer_aliases_full()
+                            if (
+                                not alias_full_for_detail.empty
+                                and "표준명" in alias_full_for_detail.columns
+                                and "법인고유번호" in alias_full_for_detail.columns
+                            ):
+                                match_row = alias_full_for_detail[alias_full_for_detail["표준명"] == norm_pick]
+                                if not match_row.empty:
+                                    stored_code = str(match_row.iloc[0]["법인고유번호"]).strip()
+                                    if stored_code:
+                                        corp_code = stored_code
 
-                            st.caption("기업개황")
-                            if overview:
-                                overview_rows = [
-                                    ("대표자명", overview.get("ceo_nm")),
-                                    ("법인구분", overview.get("corp_cls")),
-                                    ("법인등록번호", overview.get("jurir_no")),
-                                    ("사업자등록번호", overview.get("bizr_no")),
-                                    ("주소", overview.get("adres")),
-                                    ("홈페이지", overview.get("hm_url")),
-                                    ("설립일", overview.get("est_dt")),
-                                    ("결산월", overview.get("acc_mt")),
-                                ]
-                                st.dataframe(
-                                    pd.DataFrame(overview_rows, columns=["항목", "값"]),
-                                    use_container_width=True, hide_index=True
+                            # 2) 별칭 표에 없으면 DART 전체 목록에서 실시간 매칭
+                            if not corp_code:
+                                with st.spinner("DART에서 기업 코드를 찾는 중입니다..."):
+                                    corp_map = load_corp_code_map(DART_API_KEY)
+                                    corp_code = find_corp_code(pick_issuer, corp_map) or find_corp_code(norm_pick, corp_map)
+
+                            if not corp_code:
+                                st.caption(
+                                    "DART에서 이 발행사의 기업 코드를 찾지 못했습니다. "
+                                    "관리자 탭에서 법인고유번호를 직접 등록해두시면 더 정확하게 찾을 수 있습니다."
                                 )
                             else:
-                                st.caption("기업개황 정보를 가져오지 못했습니다.")
+                                with st.spinner("DART에서 기업개황을 조회하는 중입니다..."):
+                                    overview = fetch_company_overview(corp_code, DART_API_KEY)
 
-                            st.caption("재무제표")
-                            unit = st.selectbox(
-                                "금액 단위", options=["원", "천원", "백만원", "억원", "십억원", "조원"],
-                                index=3, key="fin_unit_select"
-                            )
-
-                            with st.spinner("DART에서 재무제표를 조회하는 중입니다 (여러 보고서를 확인하느라 다소 걸릴 수 있습니다)..."):
-                                full_report = fetch_full_financial_report(corp_code, DART_API_KEY)
-
-                            if not full_report:
-                                st.caption("재무제표 정보를 가져오지 못했습니다.")
-                            else:
-                                # --- 1) 재무상태표: 총자산/총부채/자기자본 ---
-                                st.markdown(f"**재무상태표** ({unit})")
-                                bs = full_report.get("BS")
-                                bs_labels = full_report["meta"].get("BS_라벨", ["전전기", "전기", "최신"])
-                                if bs:
-                                    bs_rows = []
-                                    for metric in ["총자산", "총부채", "자기자본"]:
-                                        d = bs.get(metric, {})
-                                        prev2 = d.get(bs_labels[0])
-                                        prev1 = d.get(bs_labels[1])
-                                        cur = d.get("최신")
-                                        diff, pct = fmt_unit_change(cur, prev1, unit)
-                                        bs_rows.append({
-                                            "항목": metric,
-                                            bs_labels[0]: fmt_unit(prev2, unit),
-                                            bs_labels[1]: fmt_unit(prev1, unit),
-                                            bs_labels[2]: fmt_unit(cur, unit),
-                                            f"증감({bs_labels[1]} 대비)": diff,
-                                            "증감률": pct,
-                                        })
-                                    st.dataframe(pd.DataFrame(bs_rows), use_container_width=True, hide_index=True)
-                                else:
-                                    st.caption("재무상태표 정보를 가져오지 못했습니다.")
-
-                                # --- 2) 연도별 손익계산서 (올해누적 vs 전년동기누적 증감 포함) ---
-                                st.markdown(f"**연도별 손익계산서** ({unit})")
-                                annual = full_report.get("연간손익")
-                                if annual:
-                                    labels = [annual["전전년도"]["라벨"], annual["전년도"]["라벨"], annual["올해누적"]["라벨"]]
-                                    prior_ytd_label = annual["전년동기누적"]["라벨"]
-                                    st.caption("열: " + " / ".join(labels) + f" (비교기준: {prior_ytd_label})")
-                                    annual_rows = []
-                                    for metric in ["매출액", "영업이익", "당기순이익"]:
-                                        cur_ytd = annual["올해누적"]["값"].get(metric)
-                                        prior_ytd_val = annual["전년동기누적"]["값"].get(metric)
-                                        diff, pct = fmt_unit_change(cur_ytd, prior_ytd_val, unit)
-                                        annual_rows.append({
-                                            "항목": metric,
-                                            labels[0]: fmt_unit(annual["전전년도"]["값"].get(metric), unit),
-                                            labels[1]: fmt_unit(annual["전년도"]["값"].get(metric), unit),
-                                            labels[2]: fmt_unit(cur_ytd, unit),
-                                            f"증감({prior_ytd_label} 대비)": diff,
-                                            "증감률": pct,
-                                        })
-                                    st.dataframe(pd.DataFrame(annual_rows), use_container_width=True, hide_index=True)
-                                else:
-                                    st.caption("연도별 손익계산서 정보를 가져오지 못했습니다.")
-
-                                # --- 3) 분기별 손익계산서: 작년 1~4분기 + 올해 존재하는 분기 전부 (+ 최신 vs 직전분기 증감) ---
-                                st.markdown(f"**분기별 손익계산서** ({unit})")
-                                quarterly = full_report.get("분기손익")
-                                q_series = []  # 차트용: [(라벨, 매출액, 영업이익), ...] 시간순
-                                if quarterly:
-                                    last_yr = quarterly["직전년도"]["연도"]
-                                    q_map = quarterly["직전년도"]["분기"]
-                                    this_yr = quarterly["올해"]["연도"]
-                                    this_q_map = quarterly["올해"]["분기"]
-
-                                    this_year_qs = [q for q in ["1분기", "2분기", "3분기"] if q in this_q_map]
-                                    col_labels = [f"{last_yr} {q}" for q in ["1분기", "2분기", "3분기", "4분기"]] \
-                                                 + [f"{this_yr} {q}" for q in this_year_qs]
-                                    st.caption("열: " + " / ".join(col_labels))
-
-                                    # 시간순 정렬된 (라벨, 값dict) 시퀀스 — 최신분기 vs 직전분기 비교 및 차트에 사용
-                                    ordered_seq = [(f"{last_yr} {q}", q_map.get(q, {})) for q in ["1분기", "2분기", "3분기", "4분기"]]
-                                    ordered_seq += [(f"{this_yr} {q}", this_q_map.get(q, {})) for q in this_year_qs]
-
-                                    latest_label, latest_vals = ordered_seq[-1]
-                                    prev_label, prev_vals = ordered_seq[-2] if len(ordered_seq) >= 2 else (None, {})
-
-                                    q_rows = []
-                                    for metric in ["매출액", "영업이익", "당기순이익"]:
-                                        row = {"항목": metric}
-                                        for q in ["1분기", "2분기", "3분기", "4분기"]:
-                                            row[f"{last_yr} {q}"] = fmt_unit(q_map.get(q, {}).get(metric), unit)
-                                        for q in this_year_qs:
-                                            row[f"{this_yr} {q}"] = fmt_unit(this_q_map.get(q, {}).get(metric), unit)
-                                        diff, pct = fmt_unit_change(latest_vals.get(metric), prev_vals.get(metric), unit)
-                                        row[f"증감({prev_label} 대비)" if prev_label else "증감(직전분기 대비)"] = diff
-                                        row["증감률"] = pct
-                                        q_rows.append(row)
-                                    st.dataframe(pd.DataFrame(q_rows), use_container_width=True, hide_index=True)
-                                    st.caption(
-                                        f"'{latest_label}'을 직전분기인 '{prev_label}'과 비교했습니다. "
-                                        "4분기는 사업보고서(연간) 수치에서 3분기 누적을 뺀 값이라, 결산 조정 등으로 실제 공시치와 약간 다를 수 있습니다."
+                                st.caption("기업개황")
+                                if overview:
+                                    overview_rows = [
+                                        ("대표자명", overview.get("ceo_nm")),
+                                        ("법인구분", overview.get("corp_cls")),
+                                        ("법인등록번호", overview.get("jurir_no")),
+                                        ("사업자등록번호", overview.get("bizr_no")),
+                                        ("주소", overview.get("adres")),
+                                        ("홈페이지", overview.get("hm_url")),
+                                        ("설립일", overview.get("est_dt")),
+                                        ("결산월", overview.get("acc_mt")),
+                                    ]
+                                    st.dataframe(
+                                        pd.DataFrame(overview_rows, columns=["항목", "값"]),
+                                        use_container_width=True, hide_index=True
                                     )
-
-                                    q_series = [(label, v.get("매출액"), v.get("영업이익")) for label, v in ordered_seq]
                                 else:
-                                    st.caption("분기별 손익계산서 정보를 가져오지 못했습니다.")
+                                    st.caption("기업개황 정보를 가져오지 못했습니다.")
 
-                                # --- 4) 매출액·영업이익(막대, 나란히) + 영업이익률(오른쪽 축 꺾은선) ---
-                                if q_series:
-                                    st.markdown(f"**매출액 · 영업이익 · 영업이익률 추이** ({unit})")
-                                    divisor = UNIT_DIVISORS.get(unit, 1)
-                                    quarter_order = [label for label, _, _ in q_series]
+                                st.caption("재무제표")
+                                unit = st.selectbox(
+                                    "금액 단위", options=["원", "천원", "백만원", "억원", "십억원", "조원"],
+                                    index=3, key="fin_unit_select"
+                                )
 
-                                    bar_records = []
-                                    margin_records = []
-                                    for label, rev, op in q_series:
-                                        rev_scaled = (rev / divisor) if rev is not None else None
-                                        op_scaled = (op / divisor) if op is not None else None
-                                        bar_records.append({"분기": label, "구분": "매출액", "금액": rev_scaled})
-                                        bar_records.append({"분기": label, "구분": "영업이익", "금액": op_scaled})
-                                        margin = (op / rev * 100) if (rev not in (None, 0) and op is not None) else None
-                                        margin_records.append({"분기": label, "영업이익률": margin})
+                                with st.spinner("DART에서 재무제표를 조회하는 중입니다 (여러 보고서를 확인하느라 다소 걸릴 수 있습니다)..."):
+                                    full_report = fetch_full_financial_report(corp_code, DART_API_KEY)
 
-                                    bar_df = pd.DataFrame(bar_records)
-                                    margin_df = pd.DataFrame(margin_records)
+                                if not full_report:
+                                    st.caption("재무제표 정보를 가져오지 못했습니다.")
+                                else:
+                                    # --- 1) 재무상태표: 총자산/총부채/자기자본 ---
+                                    st.markdown(f"**재무상태표** ({unit})")
+                                    bs = full_report.get("BS")
+                                    bs_labels = full_report["meta"].get("BS_라벨", ["전전기", "전기", "최신"])
+                                    if bs:
+                                        bs_rows = []
+                                        for metric in ["총자산", "총부채", "자기자본"]:
+                                            d = bs.get(metric, {})
+                                            prev2 = d.get(bs_labels[0])
+                                            prev1 = d.get(bs_labels[1])
+                                            cur = d.get("최신")
+                                            diff, pct = fmt_unit_change(cur, prev1, unit)
+                                            bs_rows.append({
+                                                "항목": metric,
+                                                bs_labels[0]: fmt_unit(prev2, unit),
+                                                bs_labels[1]: fmt_unit(prev1, unit),
+                                                bs_labels[2]: fmt_unit(cur, unit),
+                                                f"증감({bs_labels[1]} 대비)": diff,
+                                                "증감률": pct,
+                                            })
+                                        st.dataframe(pd.DataFrame(bs_rows), use_container_width=True, hide_index=True)
+                                    else:
+                                        st.caption("재무상태표 정보를 가져오지 못했습니다.")
 
-                                    bars = alt.Chart(bar_df).mark_bar().encode(
-                                        x=alt.X("분기:N", sort=quarter_order, axis=alt.Axis(labelAngle=-45, title=None)),
-                                        xOffset=alt.XOffset("구분:N", sort=["매출액", "영업이익"]),
-                                        y=alt.Y("금액:Q", title=f"금액({unit})"),
-                                        color=alt.Color("구분:N", scale=alt.Scale(
-                                            domain=["매출액", "영업이익"], range=["#1f77b4", "#ff7f0e"]
-                                        ), legend=alt.Legend(title=None)),
-                                    )
-                                    line = alt.Chart(margin_df).mark_line(
-                                        color="#2ca02c", point=True, strokeWidth=2
-                                    ).encode(
-                                        x=alt.X("분기:N", sort=quarter_order),
-                                        y=alt.Y("영업이익률:Q", title="영업이익률(%)"),
-                                    )
-                                    combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=400)
-                                    st.altair_chart(combo, use_container_width=True)
+                                    # --- 2) 연도별 손익계산서 (올해누적 vs 전년동기누적 증감 포함) ---
+                                    st.markdown(f"**연도별 손익계산서** ({unit})")
+                                    annual = full_report.get("연간손익")
+                                    if annual:
+                                        labels = [annual["전전년도"]["라벨"], annual["전년도"]["라벨"], annual["올해누적"]["라벨"]]
+                                        prior_ytd_label = annual["전년동기누적"]["라벨"]
+                                        st.caption("열: " + " / ".join(labels) + f" (비교기준: {prior_ytd_label})")
+                                        annual_rows = []
+                                        for metric in ["매출액", "영업이익", "당기순이익"]:
+                                            cur_ytd = annual["올해누적"]["값"].get(metric)
+                                            prior_ytd_val = annual["전년동기누적"]["값"].get(metric)
+                                            diff, pct = fmt_unit_change(cur_ytd, prior_ytd_val, unit)
+                                            annual_rows.append({
+                                                "항목": metric,
+                                                labels[0]: fmt_unit(annual["전전년도"]["값"].get(metric), unit),
+                                                labels[1]: fmt_unit(annual["전년도"]["값"].get(metric), unit),
+                                                labels[2]: fmt_unit(cur_ytd, unit),
+                                                f"증감({prior_ytd_label} 대비)": diff,
+                                                "증감률": pct,
+                                            })
+                                        st.dataframe(pd.DataFrame(annual_rows), use_container_width=True, hide_index=True)
+                                    else:
+                                        st.caption("연도별 손익계산서 정보를 가져오지 못했습니다.")
+
+                                    # --- 3) 분기별 손익계산서: 작년 1~4분기 + 올해 존재하는 분기 전부 (+ 최신 vs 직전분기 증감) ---
+                                    st.markdown(f"**분기별 손익계산서** ({unit})")
+                                    quarterly = full_report.get("분기손익")
+                                    q_series = []  # 차트용: [(라벨, 매출액, 영업이익), ...] 시간순
+                                    if quarterly:
+                                        last_yr = quarterly["직전년도"]["연도"]
+                                        q_map = quarterly["직전년도"]["분기"]
+                                        this_yr = quarterly["올해"]["연도"]
+                                        this_q_map = quarterly["올해"]["분기"]
+
+                                        this_year_qs = [q for q in ["1분기", "2분기", "3분기"] if q in this_q_map]
+                                        col_labels = [f"{last_yr} {q}" for q in ["1분기", "2분기", "3분기", "4분기"]] \
+                                                     + [f"{this_yr} {q}" for q in this_year_qs]
+                                        st.caption("열: " + " / ".join(col_labels))
+
+                                        # 시간순 정렬된 (라벨, 값dict) 시퀀스 — 최신분기 vs 직전분기 비교 및 차트에 사용
+                                        ordered_seq = [(f"{last_yr} {q}", q_map.get(q, {})) for q in ["1분기", "2분기", "3분기", "4분기"]]
+                                        ordered_seq += [(f"{this_yr} {q}", this_q_map.get(q, {})) for q in this_year_qs]
+
+                                        latest_label, latest_vals = ordered_seq[-1]
+                                        prev_label, prev_vals = ordered_seq[-2] if len(ordered_seq) >= 2 else (None, {})
+
+                                        q_rows = []
+                                        for metric in ["매출액", "영업이익", "당기순이익"]:
+                                            row = {"항목": metric}
+                                            for q in ["1분기", "2분기", "3분기", "4분기"]:
+                                                row[f"{last_yr} {q}"] = fmt_unit(q_map.get(q, {}).get(metric), unit)
+                                            for q in this_year_qs:
+                                                row[f"{this_yr} {q}"] = fmt_unit(this_q_map.get(q, {}).get(metric), unit)
+                                            diff, pct = fmt_unit_change(latest_vals.get(metric), prev_vals.get(metric), unit)
+                                            row[f"증감({prev_label} 대비)" if prev_label else "증감(직전분기 대비)"] = diff
+                                            row["증감률"] = pct
+                                            q_rows.append(row)
+                                        st.dataframe(pd.DataFrame(q_rows), use_container_width=True, hide_index=True)
+                                        st.caption(
+                                            f"'{latest_label}'을 직전분기인 '{prev_label}'과 비교했습니다. "
+                                            "4분기는 사업보고서(연간) 수치에서 3분기 누적을 뺀 값이라, 결산 조정 등으로 실제 공시치와 약간 다를 수 있습니다."
+                                        )
+
+                                        q_series = [(label, v.get("매출액"), v.get("영업이익")) for label, v in ordered_seq]
+                                    else:
+                                        st.caption("분기별 손익계산서 정보를 가져오지 못했습니다.")
+
+                                    # --- 4) 매출액·영업이익(막대, 나란히) + 영업이익률(오른쪽 축 꺾은선) ---
+                                    if q_series:
+                                        st.markdown(f"**매출액 · 영업이익 · 영업이익률 추이** ({unit})")
+                                        divisor = UNIT_DIVISORS.get(unit, 1)
+                                        quarter_order = [label for label, _, _ in q_series]
+
+                                        bar_records = []
+                                        margin_records = []
+                                        for label, rev, op in q_series:
+                                            rev_scaled = (rev / divisor) if rev is not None else None
+                                            op_scaled = (op / divisor) if op is not None else None
+                                            bar_records.append({"분기": label, "구분": "매출액", "금액": rev_scaled})
+                                            bar_records.append({"분기": label, "구분": "영업이익", "금액": op_scaled})
+                                            margin = (op / rev * 100) if (rev not in (None, 0) and op is not None) else None
+                                            margin_records.append({"분기": label, "영업이익률": margin})
+
+                                        bar_df = pd.DataFrame(bar_records)
+                                        margin_df = pd.DataFrame(margin_records)
+
+                                        bars = alt.Chart(bar_df).mark_bar().encode(
+                                            x=alt.X("분기:N", sort=quarter_order, axis=alt.Axis(labelAngle=-45, title=None)),
+                                            xOffset=alt.XOffset("구분:N", sort=["매출액", "영업이익"]),
+                                            y=alt.Y("금액:Q", title=f"금액({unit})"),
+                                            color=alt.Color("구분:N", scale=alt.Scale(
+                                                domain=["매출액", "영업이익"], range=["#1f77b4", "#ff7f0e"]
+                                            ), legend=alt.Legend(title=None)),
+                                        )
+                                        line = alt.Chart(margin_df).mark_line(
+                                            color="#2ca02c", point=True, strokeWidth=2
+                                        ).encode(
+                                            x=alt.X("분기:N", sort=quarter_order),
+                                            y=alt.Y("영업이익률:Q", title="영업이익률(%)"),
+                                        )
+                                        combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=400)
+                                        st.altair_chart(combo, use_container_width=True)
 
 # ==============================================================
 # 페이지: 관리자 설정
