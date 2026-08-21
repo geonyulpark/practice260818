@@ -843,13 +843,17 @@ def _noop_popover_change():
 
 def _render_deal_detail_body(st, r, btn_key, popover_key=None):
     """수요예측 상세 내용(팝업/팝오버 공용). btn_key는 '이동' 버튼의 고유 key.
-    popover_key를 주면 우측 상단에 닫기(X) 버튼이 뜨고, 누르면 그 팝오버를 닫는다."""
+    popover_key를 주면 우측 상단에 닫기(X) 버튼이 뜨고, 누르면 그 팝오버를 닫는다.
+    st.session_state[popover_key]는 위젯이 이미 그려진 뒤에는 직접 대입할 수 없어서
+    (StreamlitAPIException), on_click 콜백 안에서 처리한다 — 콜백은 다음 스크립트
+    실행 전에 미리 처리되므로 이 제약을 받지 않는다."""
     if popover_key:
+        def _close_popover():
+            st.session_state[popover_key] = False
+
         _spacer, xcol = st.columns([9, 1])
         with xcol:
-            if st.button("✕", key="closepop_" + btn_key, width="stretch"):
-                st.session_state[popover_key] = False
-                st.rerun()
+            st.button("✕", key="closepop_" + btn_key, width="stretch", on_click=_close_popover)
 
     color = rating_color(r["신용등급"])
     st.markdown("#### {}".format(r["종목명"]))
