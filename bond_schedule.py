@@ -835,6 +835,12 @@ def month_grid(df: pd.DataFrame, year: int, month: int, show_issue: bool) -> str
             + "⬚ 점선 = 발행일</span></div>")
 
 
+def _noop_popover_change():
+    """st.popover가 key로 열림/닫힘 상태를 추적하려면 on_change가 반드시 있어야 한다
+    (Streamlit 공식 문서 명시 사항). 별도로 할 일은 없어서 빈 함수로 둔다."""
+    pass
+
+
 def _render_deal_detail_body(st, r, btn_key, popover_key=None):
     """수요예측 상세 내용(팝업/팝오버 공용). btn_key는 '이동' 버튼의 고유 key.
     popover_key를 주면 우측 상단에 닫기(X) 버튼이 뜨고, 누르면 그 팝오버를 닫는다."""
@@ -851,12 +857,11 @@ def _render_deal_detail_body(st, r, btn_key, popover_key=None):
         "<span style='background:{};color:#fff;padding:2px 9px;border-radius:5px;"
         "font-size:.85rem'>{}</span>".format(color, r["신용등급"] or "-"),
         unsafe_allow_html=True)
-    st.write("")
 
     def _small_field(label, value):
         st.markdown(
-            "<div style='font-size:.78rem;color:#64748b'>{}</div>"
-            "<div style='font-size:.92rem;font-weight:600;margin-bottom:6px'>{}</div>".format(
+            "<div style='font-size:.75rem;color:#64748b;margin-top:4px'>{}</div>"
+            "<div style='font-size:1.05rem;font-weight:700'>{}</div>".format(
                 label, value),
             unsafe_allow_html=True)
 
@@ -868,14 +873,14 @@ def _render_deal_detail_body(st, r, btn_key, popover_key=None):
         _small_field("발행일", "{:%Y-%m-%d}".format(r["발행일"]) if has_date(r["발행일"]) else "미정")
         _small_field("최대발행가능액", fmt_amt(r["최대발행가능액"]))
 
-    st.markdown("**만기**: {}".format(r["만기"] or "-"))
-    st.markdown("**물량**: {}".format(r["물량"] or "-"))
-    st.markdown("**금리밴드**: {}".format(r["금리밴드"] or "밴드 미정"))
-    st.markdown("**대표주관**: {}".format(r["대표주관"] or "-"))
-    st.markdown("**상태**: {}".format(r["상태"] or "-"))
-    st.markdown("**출처**: {}".format(r["출처"] or "-"))
-    if r.get("비고"):
-        st.markdown("**비고**: {}".format(r["비고"]))
+    st.markdown(
+        "<div style='font-size:.85rem;line-height:1.5;margin-top:6px'>"
+        "<b>만기</b>: {}<br><b>물량</b>: {}<br><b>금리밴드</b>: {}<br>"
+        "<b>대표주관</b>: {}<br><b>상태</b>: {}<br><b>출처</b>: {}{}</div>".format(
+            r["만기"] or "-", r["물량"] or "-", r["금리밴드"] or "밴드 미정",
+            r["대표주관"] or "-", r["상태"] or "-", r["출처"] or "-",
+            "<br><b>비고</b>: {}".format(r["비고"]) if r.get("비고") else ""),
+        unsafe_allow_html=True)
 
     st.divider()
     if st.button("발행사별 상세보기로 이동", key=btn_key, width="stretch"):
@@ -923,10 +928,26 @@ div[class*="st-key-calday_"] div[data-testid="stPopover"],
 div[class*="st-key-calday_"] div[data-testid="stElementContainer"] {
     margin-bottom: 0 !important;
 }
-/* 발행사 클릭 시 뜨는 상세 팝업 패널: 기본 크기의 절반 수준으로 축소 */
+/* 발행사 클릭 시 뜨는 상세 팝업 패널: 더 작게, 내부 여백도 좁혀서 밀도 있게 */
 div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] {
-    width: 230px !important;
-    max-width: 230px !important;
+    width: 200px !important;
+    max-width: 200px !important;
+    padding: 10px 12px !important;
+}
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] {
+    gap: 2px !important;
+}
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] div[data-testid="stElementContainer"] {
+    margin-bottom: 0 !important;
+}
+/* 팝업 안 닫기(X) 버튼: 테두리 제거 */
+div[class*="st-key-closepop_"] button {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+div[class*="st-key-closepop_"] button:hover {
+    background: rgba(0,0,0,0.06) !important;
 }
 /* 이전/오늘/다음 버튼: 테두리 제거, 밀도 있게 */
 div[class*="st-key-bsch_prev"] button,
@@ -1004,7 +1025,7 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
                         label = "{}{} {}".format("📤" if kind == "issue" else "", emoji, nm)
                         pop_key = "cal_{}_{}_{}".format(day.isoformat(), kind, r.name)
                         pop_key_full = "calpop_{}".format(pop_key)
-                        with st.popover(label, width="stretch", key=pop_key_full):
+                        with st.popover(label, width="stretch", key=pop_key_full, on_change=_noop_popover_change):
                             st.caption(amt)
                             _render_deal_detail_body(st, r, btn_key="goto_" + pop_key, popover_key=pop_key_full)
         d += dt.timedelta(days=7)
