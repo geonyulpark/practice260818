@@ -269,8 +269,8 @@ def extract_effective_date(file_obj, sheet_name=None, max_rows=30):
 # 구조: 회사 하나가 한 행, 소스(인포맥스/한신평/나신평/한기평/위너스/DART)가 각각 열.
 ALIAS_SHEET_NAME = "발행사별칭"
 
-ALIAS_SOURCE_COLUMNS = ["한국신용평가", "나이스신용평가", "한국기업평가", "인포맥스", "위너스(WINUS)", "DART", "증권사(발행리스트)", "기타"]
-ALIAS_EXTRA_COLUMNS = ["법인고유번호"]  # 이름이 아닌 코드값 — 발행사명 별칭 로직에는 포함하지 않는다
+ALIAS_SOURCE_COLUMNS = ["한국신용평가", "나이스신용평가", "한국기업평가", "인포맥스", "위너스(WINUS)", "DART", "VALUESearch", "증권사(발행리스트)", "기타"]
+ALIAS_EXTRA_COLUMNS = ["법인고유번호", "NICE업체코드"]  # 이름이 아닌 코드값 — 발행사명 별칭 로직에는 포함하지 않는다
 ALIAS_HEADER = ["표준명"] + ALIAS_SOURCE_COLUMNS + ALIAS_EXTRA_COLUMNS
 
 
@@ -615,6 +615,71 @@ def find_dart_name(issuer_name: str, corp_map: dict):
     ]
     if len(candidates) == 1:
         return candidates[0]
+    return None
+
+
+def parse_valuesearch_company_list(file_obj):
+    """VALUESearch 'Massive Download' 기업목록(업체코드/종목코드/종목명/업체명/법인번호) 엑셀을 파싱.
+    반환: (정제된 DataFrame, 오류메시지). 성공 시 오류메시지는 None."""
+    try:
+        df = pd.read_excel(file_obj, header=1)
+    except Exception as e:
+        return None, f"파일을 읽는 중 오류가 발생했습니다: {e}"
+
+    norm_to_orig = {_norm_col(c): c for c in df.columns}
+    col_map = {"업체코드": "업체코드", "종목코드": "종목코드", "종목명": "종목명"}
+    # '691005.업체명', '691030.법인번호' 처럼 앞에 코드가 붙은 열 이름을 유연하게 찾는다
+    formal_name_col = next((c for c in df.columns if "업체명" in str(c)), None)
+    corp_no_col = next((c for c in df.columns if "법인번호" in str(c)), None)
+
+    missing = [k for k in col_map if _norm_col(k) not in norm_to_orig]
+    if missing or formal_name_col is None or corp_no_col is None:
+        return None, "예상한 열 구조와 다릅니다 (업체코드/종목코드/종목명/업체명/법인번호가 필요합니다)."
+
+    result = pd.DataFrame({
+        "업체코드": df[norm_to_orig[_norm_col("업체코드")]],
+        "종목코드": df[norm_to_orig[_norm_col("종목코드")]],
+        "종목명": df[norm_to_orig[_norm_col("종목명")]],
+        "업체명(정식)": df[formal_name_col],
+        "법인번호": df[corp_no_col],
+    })
+    result = result[result["업체코드"].notna()].reset_index(drop=True)
+    return result, None
+
+
+def build_valuesearch_lookup(vs_df: pd.DataFrame) -> dict:
+    """VALUESearch 기업목록에서 {회사명 표기: (표시용 종목명, 업체코드)} 딕셔너리를 만든다.
+    '종목명'과 '업체명(정식)' 두 표기 모두 키로 등록해 매칭 확률을 높인다."""
+    lookup = {}
+    for _, row in vs_df.iterrows():
+        code = str(row.get("업체코드", "")).strip()
+        nm = str(row.get("종목명", "")).strip()
+        formal = str(row.get("업체명(정식)", "")).strip()
+        if not code or not nm:
+            continue
+        lookup.setdefault(nm, (nm, code))
+        if formal:
+            lookup.setdefault(formal, (nm, code))
+    return lookup
+
+
+def find_valuesearch_match(issuer_name: str, vs_lookup: dict):
+    """발행사명으로 VALUESearch상의 (표시용 종목명, 업체코드)를 찾는다. find_dart_name과 같은 매칭 규칙."""
+    if pd.isna(issuer_name):
+        return None
+    issuer_name = str(issuer_name).strip()
+    if issuer_name in vs_lookup:
+        return vs_lookup[issuer_name]
+    for suffix in ["지주", "홀딩스", "㈜", "(주)"]:
+        candidate = issuer_name.replace(suffix, "").strip()
+        if candidate in vs_lookup:
+            return vs_lookup[candidate]
+    candidates = [
+        name for name in vs_lookup
+        if len(name) >= 3 and (issuer_name in name or name in issuer_name)
+    ]
+    if len(candidates) == 1:
+        return vs_lookup[candidates[0]]
     return None
 
 
@@ -3084,6 +3149,70 @@ elif page == "관리자 설정":
                         st.rerun()
                     except Exception as e:
                         st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+        st.markdown("---")
+        st.subheader("VALUESearch 기업명·업체코드 일괄 매칭")
+        st.caption(
+            "VALUESearch에서 Massive Download로 받은 기업목록(업체코드/종목명/업체명/법인번호) 엑셀을 올리면, "
+            "별칭 표의 표준명과 자동으로 매칭해 'VALUESearch' 열과 'NICE업체코드' 열을 함께 채웁니다. "
+            "DART와 달리 실시간 API가 아니라 업로드한 파일 안에서만 찾으므로, 최신 목록이 필요하면 "
+            "VALUESearch에서 다시 받아서 올려주세요."
+        )
+        vs_company_file = st.file_uploader(
+            "VALUESearch 기업목록 엑셀 업로드", type=["xlsx"], key="vs_company_list_upload"
+        )
+        if vs_company_file is not None:
+            vs_parsed, vs_err = parse_valuesearch_company_list(vs_company_file)
+            if vs_err:
+                st.error(vs_err)
+            else:
+                st.caption(f"VALUESearch 기업목록 {len(vs_parsed):,}개사를 확인했습니다.")
+                if st.button("VALUESearch 목록으로 매칭", key="vs_match_btn"):
+                    vs_lookup = build_valuesearch_lookup(vs_parsed)
+
+                    alias_df_for_vs = load_issuer_aliases_full()
+                    if alias_df_for_vs.empty or "표준명" not in alias_df_for_vs.columns:
+                        st.info("별칭 표에 등록된 회사가 아직 없습니다. 먼저 위쪽에서 회사를 추가해주세요.")
+                    else:
+                        updated_vs = alias_df_for_vs.copy()
+                        if "NICE업체코드" not in updated_vs.columns:
+                            updated_vs["NICE업체코드"] = ""
+                        matched_count_vs, filled_rows_vs = 0, []
+                        for idx, row in updated_vs.iterrows():
+                            canon = str(row.get("표준명", "")).strip()
+                            existing_vs = str(row.get("VALUESearch", "")).strip() if "VALUESearch" in updated_vs.columns else ""
+                            existing_code = str(row.get("NICE업체코드", "")).strip()
+                            if not canon or (existing_vs and existing_code):
+                                continue  # 이름·코드 둘 다 이미 있으면 건드리지 않음
+                            match = find_valuesearch_match(canon, vs_lookup)
+                            if match:
+                                matched_name, matched_code = match
+                                if not existing_vs:
+                                    updated_vs.at[idx, "VALUESearch"] = matched_name
+                                if not existing_code:
+                                    updated_vs.at[idx, "NICE업체코드"] = matched_code
+                                matched_count_vs += 1
+                                filled_rows_vs.append({
+                                    "표준명": canon, "VALUESearch 매칭명": matched_name,
+                                    "NICE업체코드": matched_code
+                                })
+
+                        st.session_state["vs_match_preview"] = updated_vs
+                        st.success(f"{matched_count_vs}개 회사에 새로 VALUESearch 회사명/업체코드를 채웠습니다 (기존에 값이 있던 칸은 건드리지 않았습니다).")
+                        if filled_rows_vs:
+                            st.dataframe(pd.DataFrame(filled_rows_vs), use_container_width=True, hide_index=True)
+
+        if "vs_match_preview" in st.session_state:
+            st.markdown("**매칭 결과 미리보기 (VALUESearch·NICE업체코드 열 반영됨)**")
+            st.dataframe(st.session_state["vs_match_preview"], use_container_width=True, hide_index=True, height=300)
+            if st.button("이 매칭 결과 저장", key="save_vs_match_btn"):
+                try:
+                    save_alias_excel_upload(st.session_state["vs_match_preview"])
+                    del st.session_state["vs_match_preview"]
+                    st.success("VALUESearch 매칭 결과를 저장했습니다.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"저장 중 오류가 발생했습니다: {e}")
 
         st.markdown("---")
         st.subheader("미매칭 발행사 자동 탐지")
