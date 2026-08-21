@@ -753,6 +753,18 @@ def rating_color(rating) -> str:
     return next((c for p, c in RATING_COLORS if r.startswith(p)), FALLBACK)
 
 
+RATING_EMOJI = [
+    ("AAA", "🔵"), ("AA", "🔵"), ("A", "🟢"),
+    ("BBB", "🟠"), ("BB", "🔴"), ("B", "⚫"),
+]
+FALLBACK_EMOJI = "⚪"
+
+
+def rating_emoji(rating) -> str:
+    r = str(rating or "").upper().replace(" ", "")
+    return next((e for p, e in RATING_EMOJI if r.startswith(p)), FALLBACK_EMOJI)
+
+
 def fmt_amt(v) -> str:
     n = to_num(v)
     if n is None or n <= 0:
@@ -857,6 +869,67 @@ def _render_deal_detail_body(st, r, btn_key):
         st.rerun()
 
 
+def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issue: bool):
+    """st.columns + st.popover로 그리는 네이티브 캘린더.
+    칩(버튼)을 클릭하면 새로고침 없이 그 옆에 상세 팝업이 뜬다.
+    HTML 그리드(month_grid)보다는 성기지만, 클릭 상호작용이 필요해 이 방식을 쓴다."""
+    first = dt.date(year, month, 1)
+    start = first - dt.timedelta(days=first.weekday())
+    last = dt.date(year, month, calendar.monthrange(year, month)[1])
+    end = last + dt.timedelta(days=6 - last.weekday())
+    today = dt.date.today()
+
+    by_day = {}
+    for _, r in df.iterrows():
+        if has_date(r["수요예측일"]):
+            by_day.setdefault(r["수요예측일"], []).append(("demand", r))
+        if show_issue and has_date(r["발행일"]):
+            by_day.setdefault(r["발행일"], []).append(("issue", r))
+
+    head_cols = st.columns(7)
+    for i, w in enumerate(WEEKDAYS):
+        color = "#2563eb" if i == 5 else "#dc2626" if i == 6 else "#475569"
+        head_cols[i].markdown(
+            "<div style='text-align:center;font-weight:600;font-size:.82rem;color:{}'>{}</div>".format(color, w),
+            unsafe_allow_html=True)
+
+    d = start
+    while d <= end:
+        cols = st.columns(7)
+        for i in range(7):
+            day = d + dt.timedelta(days=i)
+            with cols[i]:
+                with st.container(border=True, height=150):
+                    if day == today:
+                        st.markdown(":orange[**{}**]".format(day.day))
+                    elif day.month != month:
+                        st.caption(str(day.day))
+                    else:
+                        st.markdown("**{}**".format(day.day))
+
+                    events = sorted(
+                        by_day.get(day, []),
+                        key=lambda x: (x[0] != "demand", str(x[1]["종목명"]))
+                    )
+                    for kind, r in events:
+                        emoji = rating_emoji(r["신용등급"])
+                        amt = fmt_amt(r["최대발행가능액"])
+                        nm = str(r["종목명"])[:8]
+                        label = "{}{} {}".format("📤" if kind == "issue" else "", emoji, nm)
+                        pop_key = "cal_{}_{}_{}".format(day.isoformat(), kind, r.name)
+                        with st.popover(label, width="stretch"):
+                            st.caption(amt)
+                            _render_deal_detail_body(st, r, btn_key="goto_" + pop_key)
+        d += dt.timedelta(days=7)
+
+    st.markdown(
+        "<div style='display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;"
+        "color:#475569;margin-top:8px'>"
+        + "".join("<span>{} {}</span>".format(e, p) for p, e in RATING_EMOJI)
+        + "<span style='margin-left:auto'>📤 = 발행일 (수요예측일과 구분)</span></div>",
+        unsafe_allow_html=True)
+
+
 def render_page(st, read_history):
     """Compass 뷰 페이지: 캘린더 + 목록 + 다가오는 일정."""
     st.header("수요예측 일정")
@@ -921,8 +994,8 @@ def render_page(st, read_history):
         if not show_hybrid:
             cal_view = cal_view[~cal_view["종목명"].astype(str).str.contains("신종", na=False)]
 
-        st.markdown(month_grid(cal_view, y, m, show_issue), unsafe_allow_html=True)
-        st.caption("칩에 마우스를 올리면 요약정보가 뜹니다. 클릭 가능한 상세보기는 아래 '⏭ 다가오는 일정' 탭에 있습니다.")
+        render_month_calendar(st, cal_view, y, m, show_issue)
+        st.caption("칩을 클릭하면 새로고침 없이 옆에 상세정보가 뜹니다.")
 
     with tab_list:
         show = view.sort_values(["수요예측일", "발행일"], na_position="last")
@@ -951,7 +1024,7 @@ def render_page(st, read_history):
             for _, r in grp.iterrows():
                 color = rating_color(r["신용등급"])
                 with st.container(border=True):
-                    a, b, c = st.columns([3, 4, 1])
+                    a, b = st.columns([3, 5])
                     a.markdown(
                         "**{}** &nbsp;<span style='background:{};color:#fff;padding:1px 7px;"
                         "border-radius:4px;font-size:.78rem'>{}</span><br>"
@@ -967,10 +1040,6 @@ def render_page(st, read_history):
                             r["물량"] or "-", r["금리밴드"] or "밴드 미정",
                             r["대표주관"] or "-"),
                         unsafe_allow_html=True)
-                    with c:
-                        st.write("")
-                        with st.popover("상세", width="stretch"):
-                            _render_deal_detail_body(st, r, btn_key="bsch_goto_{}".format(r.name))
 
 
 def render_upload_tab(st, read_history, get_client, sheet_id, alias_map=None):
