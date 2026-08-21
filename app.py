@@ -9,6 +9,7 @@ import datetime
 import xml.etree.ElementTree as ET
 import gspread
 from google.oauth2.service_account import Credentials
+import bond_schedule
 
 st.set_page_config(page_title="Compass", layout="wide")
 st.title("🧭 Compass")
@@ -16,7 +17,7 @@ st.title("🧭 Compass")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 
-NAV_VIEW_PAGES = ["채권 스프레드", "신용등급 트리거", "익스포저", "최근공시", "발행사별 상세보기"]
+NAV_VIEW_PAGES = ["수요예측 일정", "채권 스프레드", "신용등급 트리거", "익스포저", "최근공시", "발행사별 상세보기"]
 NAV_ADMIN_PAGES = ["데이터 업로드", "관리자 설정"]
 
 if "nav_page" not in st.session_state:
@@ -240,7 +241,7 @@ def extract_effective_date(file_obj, sheet_name=None, max_rows=30):
 # 구조: 회사 하나가 한 행, 소스(인포맥스/한신평/나신평/한기평/위너스/DART)가 각각 열.
 ALIAS_SHEET_NAME = "발행사별칭"
 
-ALIAS_SOURCE_COLUMNS = ["한국신용평가", "나이스신용평가", "한국기업평가", "인포맥스", "위너스(WINUS)", "DART", "기타"]
+ALIAS_SOURCE_COLUMNS = ["한국신용평가", "나이스신용평가", "한국기업평가", "인포맥스", "위너스(WINUS)", "DART", "증권사(발행리스트)", "기타"]
 ALIAS_EXTRA_COLUMNS = ["법인고유번호"]  # 이름이 아닌 코드값 — 발행사명 별칭 로직에는 포함하지 않는다
 ALIAS_HEADER = ["표준명"] + ALIAS_SOURCE_COLUMNS + ALIAS_EXTRA_COLUMNS
 
@@ -1218,9 +1219,13 @@ if page == "데이터 업로드":
         st.warning("관리자 로그인이 필요합니다. 왼쪽 사이드바에서 로그인해주세요.")
         st.stop()
     st.header("데이터 업로드")
-    upload_tab1, upload_tab2, upload_tab3 = st.tabs(
-        ["인포맥스 채권 스프레드", "신용평가사 트리거", "위너스 익스포저"]
+    upload_tab1, upload_tab2, upload_tab3, upload_tab4 = st.tabs(
+        ["인포맥스 채권 스프레드", "신용평가사 트리거", "위너스 익스포저", "회사채 발행 리스트"]
     )
+    with upload_tab4:
+        bond_schedule.render_upload_tab(
+            st, read_history, get_gsheet_client,
+            st.secrets["GOOGLE_SHEET_ID"], load_issuer_aliases())
     with upload_tab1:
         st.caption("인포맥스 채권 수익률 파일을 업로드하면 '공모/무보증' 발행사만 자동으로 필터링해 보여줍니다.")
 
@@ -1805,6 +1810,12 @@ if page == "데이터 업로드":
                                 st.success(f"{winus_date} 기준 {len(winus_parsed)}건을 이력에 저장했습니다.")
                             except Exception as e:
                                 st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+# ==============================================================
+# 페이지: 수요예측 일정 (조회)
+# ==============================================================
+elif page == "수요예측 일정":
+    bond_schedule.render_page(st, read_history)
 
 # ==============================================================
 # 페이지: 채권 스프레드 (조회)
