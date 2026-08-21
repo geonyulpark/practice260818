@@ -984,9 +984,11 @@ div[class*="st-key-bsch_today"] button:hover,
 div[class*="st-key-bsch_next"] button:hover {
     background: rgba(49,51,63,0.06) !important;
 }
-/* 다가오는 일정 카드: 창이 커져도 일정 폭 이상 늘어나지 않도록 상한 지정 */
-div[class*="st-key-updeal_"] {
-    max-width: 720px !important;
+/* 신용등급/출처 증권사/종목명 검색 필터: 가로 폭 제한 */
+div[class*="st-key-bsch_grade"],
+div[class*="st-key-bsch_src"],
+div[class*="st-key-bsch_q"] {
+    max-width: 320px !important;
 }
 </style>
 """
