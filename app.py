@@ -671,11 +671,18 @@ def fetch_market_disclosures(api_key: str, days: int = 3, max_pages: int = 15):
             "page_no": page,
             "page_count": 100,
         }
-        try:
-            resp = requests.get(url, params=params, timeout=15)
-            data = resp.json()
-        except Exception as e:
-            return all_items, f"요청 중 오류: {e}"
+        data = None
+        last_error = None
+        for attempt in range(2):  # 타임아웃 등 일시적 오류에 대비해 한 번 더 재시도
+            try:
+                resp = requests.get(url, params=params, timeout=30)
+                data = resp.json()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+        if last_error is not None:
+            return all_items, f"요청 중 오류(재시도 포함 실패): {last_error}"
         status = data.get("status")
         if status != "000":
             message = data.get("message", "")
