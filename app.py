@@ -141,6 +141,173 @@ def upload_companies_to_bigquery(vs_df: pd.DataFrame, dataset_id: str = "compass
     return len(df)
 
 
+_VS_FIN_HEADER_PATTERN = re.compile(r"^(\d{4})/(.+?)\s+(\d+)\.(.+?)(?:\s*\((연결|별도)\))?$")
+_VS_PERIOD_FIXED_MAP = {"Annual": "결산", "Semi Annual": "반기", "SemiAnnual": "반기"}
+_VS_QUARTER_PATTERN = re.compile(r"^(\d)\s*Q(?:uarter)?$", re.IGNORECASE)
+
+
+def _normalize_vs_period_label(label: str) -> str:
+    """VALUESearch 기간표시(Annual/Semi Annual/1Quarter/1Q 등)를 통일된 표기로 바꾼다.
+    'N분기' 계열은 정규식으로 유연하게 잡아서(1Q/1Quarter/3Q/3Quarter 등 표기가 섞여 나와도
+    빠짐없이 인식되게), 못 알아본 표기는 원본 그대로 보존한다(데이터가 조용히 없어지지 않도록)."""
+    label = label.strip()
+    if label in _VS_PERIOD_FIXED_MAP:
+        return _VS_PERIOD_FIXED_MAP[label]
+    m = _VS_QUARTER_PATTERN.match(label)
+    if m:
+        return f"{m.group(1)}분기"
+    return label
+
+
+def parse_valuesearch_financials_wide(file_obj):
+    """VALUESearch Massive Download 재무데이터(가로형: 업체 x 연도x계정)를 세로형(Long)으로 변환.
+    연결/별도는 계정(열)마다 헤더에 적힌 표시를 그대로 따른다 — '(연결)'이 있으면 연결, 없으면 별도.
+    사람이 파일 전체에 일괄로 지정하지 않는 이유: 같은 파일 안에서도 계정에 따라 표시가 정확히
+    따로 붙기 때문이다 (예: 128200 총당기순이익은 연결 요청 시 '(연결)'이 붙고, 129000 당기순이익은
+    애초에 표시가 없는 별도 기준 계정이라, 연결 파일에 섞여 나와도 자동으로 '별도'로 분류된다).
+    기간표시(Annual/Semi Annual/1Quarter 등)도 계정마다 다를 수 있어서 열마다 그대로 읽어서 반영한다.
+    반환값: (long_df, 오류메시지, 매칭 안 된 열 목록). 매칭 안 된 열이 있으면 호출부에서 경고로 보여줄 수 있다."""
+    try:
+        raw = pd.read_excel(file_obj, header=None)
+    except Exception as e:
+        return None, f"파일을 읽는 중 오류가 발생했습니다: {e}", []
+
+    header_row_idx = None
+    for i in range(min(5, len(raw))):
+        if str(raw.iloc[i, 0]).strip() == "업체코드":
+            header_row_idx = i
+            break
+    if header_row_idx is None:
+        return None, "헤더 행(업체코드로 시작하는 행)을 찾지 못했습니다.", []
+
+    df = pd.read_excel(file_obj, header=header_row_idx)
+    id_cols = ["업체코드", "종목코드", "종목명"]
+    missing_id = [c for c in id_cols if c not in df.columns]
+    if missing_id:
+        return None, f"필수 열이 없습니다: {missing_id}", []
+
+    records = []
+    unmatched_cols = []
+    for col in df.columns:
+        if col in id_cols:
+            continue
+        m = _VS_FIN_HEADER_PATTERN.match(str(col).strip())
+        if not m:
+            unmatched_cols.append(str(col))
+            continue
+        year, period_label, code, name, basis_tag = (
+            m.group(1), m.group(2).strip(), m.group(3), m.group(4).strip(), m.group(5)
+        )
+        period_type = _normalize_vs_period_label(period_label)
+        basis = basis_tag if basis_tag else "별도"  # 표시가 없으면 별도 기준
+        sub = df[id_cols + [col]].rename(columns={col: "amount"})
+        sub = sub[sub["amount"].notna()]
+        if sub.empty:
+            continue
+        sub = sub.copy()
+        sub["fiscal_year"] = int(year)
+        sub["period_type"] = period_type
+        sub["basis"] = basis
+        sub["account_code"] = code
+        sub["account_name"] = name
+        records.append(sub)
+
+    if not records:
+        return None, "인식할 수 있는 계정 열을 찾지 못했습니다 (헤더 형식이 예상과 다를 수 있습니다).", unmatched_cols
+
+    long_df = pd.concat(records, ignore_index=True)
+    long_df = long_df.rename(columns={"업체코드": "nice_code", "종목명": "corp_name"})
+    long_df["amount"] = pd.to_numeric(long_df["amount"], errors="coerce")
+    long_df = long_df[long_df["amount"].notna()]
+
+    return long_df[["nice_code", "corp_name", "fiscal_year", "period_type", "basis",
+                     "account_code", "account_name", "amount"]], None, unmatched_cols
+
+
+def compute_derived_financials(long_df: pd.DataFrame) -> pd.DataFrame:
+    """원본 계정(long_df)에 총차입금/순차입금/EBITDA 등 파생 계정을 계산해서 추가한다.
+    당기순이익은 연결이면 128200(총당기순이익), 별도면 129000(당기순이익)을 쓴다 — 이 둘은
+    회계기준 자체가 달라 합산하면 안 되는 값이라, 파일의 basis에 따라 하나만 선택한다.
+
+    (nice_code, fiscal_year, period_type, basis) 조합 중, 어쩌다 계정 하나만 기간구분이
+    달라서(예: 대부분 '결산'인데 특정 계정만 'Semi Annual'로 표시) 생기는 '유령 그룹'을
+    걸러내기 위해, 자산총계(115000)가 있는 그룹에 대해서만 파생값을 계산한다 — 안 그러면
+    그 유령 그룹의 다른 모든 계정이 전부 0으로 채워진 가짜 행이 생긴다."""
+    wide = long_df.pivot_table(
+        index=["nice_code", "corp_name", "fiscal_year", "period_type", "basis"],
+        columns="account_code", values="amount", aggfunc="first"
+    )
+
+    valid_mask = wide["115000"].notna() if "115000" in wide.columns else pd.Series(False, index=wide.index)
+    wide = wide.loc[valid_mask]
+
+    def col0(code):
+        """계정이 아예 없는 회사는 0으로 취급 (합산용)."""
+        return wide[code].fillna(0) if code in wide.columns else pd.Series(0.0, index=wide.index)
+
+    def col_raw(code):
+        """계정이 없으면 NaN 그대로 유지 (직접 조회용 — 0으로 오인하면 안 되는 경우)."""
+        return wide[code] if code in wide.columns else pd.Series(index=wide.index, dtype="float64")
+
+    derived = pd.DataFrame(index=wide.index)
+    derived["현금성자산"] = col0("111100") + col0("111233")
+    derived["매출채권"] = col0("111156") + col0("111170") + col0("111183") + col0("111190")
+    단기성차입금 = col0("115130") + col0("115191") + col0("115192") + col0("115193") + col0("115195")
+    장기성차입금 = col0("116050") + col0("116200") + col0("116260")
+    derived["단기성차입금계"] = 단기성차입금
+    derived["장기성차입금계"] = 장기성차입금
+    derived["총차입금"] = 단기성차입금 + 장기성차입금
+    derived["순차입금"] = derived["총차입금"] - derived["현금성자산"]
+    derived["감가상각비"] = col0("161211") + col0("161212")
+    derived["EBITDA"] = col0("125000") + derived["감가상각비"]
+    derived["금융비용"] = col0("126110") + col0("126120") + col0("126132") + col0("126139") + col0("126104")
+    derived["Capex"] = col0("162550") - col0("162150")
+
+    basis_level = wide.index.get_level_values("basis")
+    net_income = col_raw("128200").where(basis_level == "연결", col_raw("129000"))
+    derived["당기순이익"] = net_income
+
+    derived = derived.reset_index().melt(
+        id_vars=["nice_code", "corp_name", "fiscal_year", "period_type", "basis"],
+        var_name="account_name", value_name="amount"
+    )
+    derived["account_code"] = "D_" + derived["account_name"]
+    derived = derived[derived["amount"].notna()]
+    derived = derived[["nice_code", "corp_name", "fiscal_year", "period_type", "basis",
+                        "account_code", "account_name", "amount"]]
+
+    return pd.concat([long_df, derived], ignore_index=True)
+
+
+def upload_financials_to_bigquery(long_df: pd.DataFrame, dataset_id: str = "compass_findata",
+                                   table_id: str = "financial_statements"):
+    """재무데이터(원본+파생, Long 포맷)를 BigQuery에 적재.
+    같은 (연도, basis) 조합이 이미 있으면 먼저 지우고 새로 넣어서, 같은 파일을 다시 올려도
+    중복되지 않게 한다 (테이블이 아직 없으면 지울 것도 없으니 조용히 넘어간다)."""
+    client = get_bigquery_client()
+    df = long_df.copy()
+    df["source_file"] = "manual_upload"
+    df["loaded_at"] = pd.Timestamp.now("UTC")
+
+    table_ref = f"{client.project}.{dataset_id}.{table_id}"
+
+    fiscal_years = sorted(df["fiscal_year"].unique().tolist())
+    basis_list = sorted(df["basis"].unique().tolist())
+    years_sql = ",".join(str(y) for y in fiscal_years)
+    basis_sql = ",".join(f"'{b}'" for b in basis_list)
+    try:
+        client.query(
+            f"DELETE FROM `{table_ref}` WHERE fiscal_year IN ({years_sql}) AND basis IN ({basis_sql})"
+        ).result()
+    except Exception:
+        pass  # 테이블이 아직 없으면 지울 것도 없음 — 무시하고 아래에서 새로 만들며 적재
+
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_dataframe(df, table_ref, job_config=job_config)
+    job.result()
+    return len(df)
+
+
 def append_history(df: pd.DataFrame, worksheet_name: str, date_str: str, date_col: str = "업데이트일자"):
     """df를 지정한 워크시트에 날짜열과 함께 이력으로 쌓는다.
     같은 날짜(date_str) 데이터가 이미 있으면 먼저 지우고 새로 씀 (재업로드시 중복 방지)."""
@@ -3265,6 +3432,55 @@ elif page == "관리자 설정":
                     st.rerun()
                 except Exception as e:
                     st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+        st.markdown("---")
+        st.subheader("VALUESearch 재무데이터 업로드 (BigQuery 적재)")
+        st.caption(
+            "VALUESearch Massive Download로 받은 재무데이터(회사 × 연도×계정, 가로형) 엑셀을 올리면, "
+            "계정마다 한 행씩(세로형)으로 바꾸고 총차입금·순차입금·EBITDA·금융비용·Capex·당기순이익 같은 "
+            "파생 계정까지 계산해서 BigQuery `financial_statements` 테이블에 적재합니다. "
+            "연결/별도는 계정(열)마다 헤더의 '(연결)' 표시 유무로 자동 판단합니다 — 표시가 있으면 연결, "
+            "없으면 별도입니다. 같은 (연도, 연결/별도) 조합을 다시 올리면 기존 것을 지우고 새로 넣어서 "
+            "중복되지 않습니다."
+        )
+        vs_fin_file = st.file_uploader(
+            "VALUESearch 재무데이터 엑셀 업로드", type=["xlsx"], key="vs_fin_upload"
+        )
+        if vs_fin_file is not None:
+            vs_fin_parsed, vs_fin_err, vs_fin_unmatched = parse_valuesearch_financials_wide(vs_fin_file)
+            if vs_fin_err:
+                st.error(vs_fin_err)
+            else:
+                if vs_fin_unmatched:
+                    st.warning(
+                        f"⚠️ 헤더 형식을 인식하지 못해 건너뛴 열이 {len(vs_fin_unmatched)}개 있습니다 "
+                        "(계정 데이터가 아니거나, 예상과 다른 표기일 수 있습니다):\n\n"
+                        + ", ".join(vs_fin_unmatched[:20]) + (" ..." if len(vs_fin_unmatched) > 20 else "")
+                    )
+                years_found = sorted(vs_fin_parsed["fiscal_year"].unique().tolist())
+                periods_found = sorted(vs_fin_parsed["period_type"].unique().tolist())
+                basis_found = sorted(vs_fin_parsed["basis"].unique().tolist())
+                accounts_found = vs_fin_parsed["account_code"].nunique()
+                st.caption(
+                    f"파싱 결과: {len(vs_fin_parsed):,}행 · 연도 {years_found} · 기간구분 {periods_found} · "
+                    f"연결/별도 자동판단 결과 {basis_found} · 계정 {accounts_found}종"
+                )
+                if st.button("파생 계정 계산 + BigQuery 적재", key="vs_fin_upload_btn"):
+                    with st.spinner("총차입금·EBITDA 등 파생 계정을 계산하는 중입니다..."):
+                        full_df = compute_derived_financials(vs_fin_parsed)
+                    st.caption(f"원본 {len(vs_fin_parsed):,}행 + 파생 계정 포함 총 {len(full_df):,}행")
+
+                    with st.spinner(f"BigQuery에 {len(full_df):,}행을 적재하는 중입니다 (다소 걸릴 수 있습니다)..."):
+                        try:
+                            n_loaded = upload_financials_to_bigquery(full_df)
+                            st.success(f"BigQuery `financial_statements` 테이블에 {n_loaded:,}행을 적재했습니다.")
+                        except Exception as e:
+                            st.error(
+                                f"BigQuery 적재 중 오류가 발생했습니다: {e}\n\n"
+                                "`financial_statements` 테이블이 아직 없으면 처음엔 자동으로 만들어지지만, "
+                                "미리 설계해둔 파티션·클러스터링까지 적용하려면 BigQuery 콘솔에서 "
+                                "CREATE TABLE DDL을 먼저 실행해두시는 걸 추천드립니다."
+                            )
 
         st.markdown("---")
         st.subheader("미매칭 발행사 자동 탐지")
