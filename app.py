@@ -451,6 +451,27 @@ def create_financial_percentiles_view(dataset_id: str = "compass_findata",
     return view_ref
 
 
+def fetch_financial_percentiles(nice_code: str, dataset_id: str = "compass_findata",
+                                 view_name: str = "financial_percentiles"):
+    """특정 회사(NICE업체코드) 하나의 전체 연도·기간구분·연결/별도 재무비율+퍼센타일 이력을 가져온다.
+    반환값: (DataFrame, 오류메시지)."""
+    client = get_bigquery_client()
+    view_ref = f"{client.project}.{dataset_id}.{view_name}"
+    query = f"""
+        SELECT *
+        FROM `{view_ref}`
+        WHERE nice_code = @nice_code
+        ORDER BY fiscal_year DESC, period_type
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("nice_code", "STRING", nice_code)]
+    )
+    try:
+        return client.query(query, job_config=job_config).to_dataframe(), None
+    except Exception as e:
+        return None, f"조회 중 오류가 발생했습니다: {e}"
+
+
 def append_history(df: pd.DataFrame, worksheet_name: str, date_str: str, date_col: str = "업데이트일자"):
     """df를 지정한 워크시트에 날짜열과 함께 이력으로 쌓는다.
     같은 날짜(date_str) 데이터가 이미 있으면 먼저 지우고 새로 씀 (재업로드시 중복 방지)."""
@@ -3204,6 +3225,128 @@ elif page == "발행사별 상세보기":
                                         )
                                         combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=400)
                                         st.altair_chart(combo, use_container_width=True)
+
+                    st.markdown(f"**{pick_issuer} — VALUESearch 재무비율 분석 (BigQuery)**")
+                    alias_full_for_vs_detail = load_issuer_aliases_full()
+                    vs_nice_code = None
+                    if (
+                        not alias_full_for_vs_detail.empty
+                        and "표준명" in alias_full_for_vs_detail.columns
+                        and "NICE업체코드" in alias_full_for_vs_detail.columns
+                    ):
+                        match_row_vs = alias_full_for_vs_detail[alias_full_for_vs_detail["표준명"] == norm_pick]
+                        if not match_row_vs.empty:
+                            code_val = str(match_row_vs.iloc[0]["NICE업체코드"]).strip()
+                            if code_val:
+                                vs_nice_code = code_val
+
+                    if not vs_nice_code:
+                        st.caption(
+                            "이 발행사의 NICE업체코드가 별칭 표에 없습니다. 관리자 탭의 "
+                            "'VALUESearch 기업목록 업로드'에서 먼저 매칭해주세요."
+                        )
+                    else:
+                        run_vs_detail = st.button("BigQuery에서 재무비율 조회", key="vs_ratio_fetch_btn")
+                        if not run_vs_detail:
+                            st.caption("버튼을 누르면 아래에 요약표와 추이 차트가 표시됩니다.")
+                        else:
+                            with st.spinner("BigQuery에서 재무비율을 조회하는 중입니다..."):
+                                vs_hist, vs_hist_err = fetch_financial_percentiles(vs_nice_code)
+
+                            if vs_hist_err:
+                                st.error(vs_hist_err)
+                            elif vs_hist is None or vs_hist.empty:
+                                st.caption("이 회사의 재무비율 데이터가 아직 BigQuery에 없습니다.")
+                            else:
+                                basis_options_vs = sorted(vs_hist["basis"].unique().tolist())
+                                pick_basis_vs = (
+                                    st.radio("연결/별도", basis_options_vs, horizontal=True, key="vs_ratio_basis")
+                                    if len(basis_options_vs) > 1 else basis_options_vs[0]
+                                )
+                                sub_vs = vs_hist[vs_hist["basis"] == pick_basis_vs].copy()
+
+                                period_options_vs = sorted(sub_vs["period_type"].unique().tolist())
+                                default_idx_vs = period_options_vs.index("결산") if "결산" in period_options_vs else 0
+                                pick_period_vs = st.selectbox(
+                                    "기간구분", period_options_vs, index=default_idx_vs, key="vs_ratio_period"
+                                )
+                                sub_vs = sub_vs[sub_vs["period_type"] == pick_period_vs].sort_values("fiscal_year")
+
+                                if sub_vs.empty:
+                                    st.caption("선택한 조건에 해당하는 데이터가 없습니다.")
+                                else:
+                                    ratio_defs = [
+                                        ("이자보상배율", "배"), ("순차입금_EBITDA배율", "배"),
+                                        ("부채비율", "%"), ("차입금의존도", "%"), ("유동비율", "%"),
+                                        ("영업이익률", "%"), ("순이익률", "%"), ("ROE", "%"), ("매출액증가율", "%"),
+                                    ]
+
+                                    def _fmt_ratio_vs(val, unit):
+                                        return "-" if pd.isna(val) else f"{val:,.2f}{unit}"
+
+                                    def _fmt_pct_vs(val):
+                                        return "-" if pd.isna(val) else f"{val:.0f}퍼센타일"
+
+                                    latest_vs = sub_vs.iloc[-1]
+                                    st.markdown(f"**{int(latest_vs['fiscal_year'])}년 {pick_period_vs} 기준 ({pick_basis_vs})**")
+                                    summary_rows_vs = [
+                                        {
+                                            "지표": metric,
+                                            "값": _fmt_ratio_vs(latest_vs.get(metric), unit),
+                                            "전체 대비 퍼센타일": _fmt_pct_vs(latest_vs.get(f"{metric}_퍼센타일")),
+                                        }
+                                        for metric, unit in ratio_defs
+                                    ]
+                                    st.dataframe(
+                                        pd.DataFrame(summary_rows_vs), use_container_width=True, hide_index=True
+                                    )
+
+                                    st.markdown("**연도별 추이**")
+                                    chart_df_vs = sub_vs[["fiscal_year"] + [m for m, _ in ratio_defs]].copy()
+                                    chart_df_vs["fiscal_year"] = chart_df_vs["fiscal_year"].astype(str)
+
+                                    def _trend_chart(value_vars, y_title, title):
+                                        melted = chart_df_vs.melt(
+                                            id_vars="fiscal_year", value_vars=value_vars,
+                                            var_name="지표", value_name="값"
+                                        ).dropna(subset=["값"])
+                                        if melted.empty:
+                                            return None
+                                        return alt.Chart(melted).mark_line(point=True).encode(
+                                            x=alt.X("fiscal_year:N", title="연도"),
+                                            y=alt.Y("값:Q", title=y_title),
+                                            color=alt.Color("지표:N", legend=alt.Legend(title=None)),
+                                        ).properties(height=280, title=title)
+
+                                    lev_chart = _trend_chart(["부채비율", "차입금의존도"], "%", "부채비율 / 차입금의존도")
+                                    if lev_chart is not None:
+                                        st.altair_chart(lev_chart, use_container_width=True)
+
+                                    cov_chart = _trend_chart(
+                                        ["이자보상배율", "순차입금_EBITDA배율"], "배", "이자보상배율 / 순차입금·EBITDA배율"
+                                    )
+                                    if cov_chart is not None:
+                                        st.altair_chart(cov_chart, use_container_width=True)
+
+                                    prof_chart = _trend_chart(
+                                        ["영업이익률", "순이익률", "ROE"], "%", "영업이익률 / 순이익률 / ROE"
+                                    )
+                                    if prof_chart is not None:
+                                        st.altair_chart(prof_chart, use_container_width=True)
+
+                                    growth_df_vs = chart_df_vs[["fiscal_year", "매출액증가율"]].dropna(
+                                        subset=["매출액증가율"]
+                                    )
+                                    if not growth_df_vs.empty:
+                                        growth_chart = alt.Chart(growth_df_vs).mark_bar().encode(
+                                            x=alt.X("fiscal_year:N", title="연도"),
+                                            y=alt.Y("매출액증가율:Q", title="%"),
+                                            color=alt.condition(
+                                                "datum['매출액증가율'] > 0",
+                                                alt.value("#2563eb"), alt.value("#dc2626")
+                                            ),
+                                        ).properties(height=250, title="매출액증가율")
+                                        st.altair_chart(growth_chart, use_container_width=True)
 
 # ==============================================================
 # 페이지: 관리자 설정
