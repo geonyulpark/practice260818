@@ -835,8 +835,16 @@ def month_grid(df: pd.DataFrame, year: int, month: int, show_issue: bool) -> str
             + "⬚ 점선 = 발행일</span></div>")
 
 
-def _render_deal_detail_body(st, r, btn_key):
-    """수요예측 상세 내용(팝업/팝오버 공용). btn_key는 '이동' 버튼의 고유 key."""
+def _render_deal_detail_body(st, r, btn_key, popover_key=None):
+    """수요예측 상세 내용(팝업/팝오버 공용). btn_key는 '이동' 버튼의 고유 key.
+    popover_key를 주면 우측 상단에 닫기(X) 버튼이 뜨고, 누르면 그 팝오버를 닫는다."""
+    if popover_key:
+        _spacer, xcol = st.columns([9, 1])
+        with xcol:
+            if st.button("✕", key="closepop_" + btn_key, width="stretch"):
+                st.session_state[popover_key] = False
+                st.rerun()
+
     color = rating_color(r["신용등급"])
     st.markdown("#### {}".format(r["종목명"]))
     st.markdown(
@@ -845,11 +853,20 @@ def _render_deal_detail_body(st, r, btn_key):
         unsafe_allow_html=True)
     st.write("")
 
+    def _small_field(label, value):
+        st.markdown(
+            "<div style='font-size:.78rem;color:#64748b'>{}</div>"
+            "<div style='font-size:.92rem;font-weight:600;margin-bottom:6px'>{}</div>".format(
+                label, value),
+            unsafe_allow_html=True)
+
     c1, c2 = st.columns(2)
-    c1.metric("수요예측일", "{:%Y-%m-%d}".format(r["수요예측일"]) if has_date(r["수요예측일"]) else "미정")
-    c2.metric("발행일", "{:%Y-%m-%d}".format(r["발행일"]) if has_date(r["발행일"]) else "미정")
-    c1.metric("신고발행금액", fmt_amt(r["신고발행금액"]))
-    c2.metric("최대발행가능액", fmt_amt(r["최대발행가능액"]))
+    with c1:
+        _small_field("수요예측일", "{:%Y-%m-%d}".format(r["수요예측일"]) if has_date(r["수요예측일"]) else "미정")
+        _small_field("신고발행금액", fmt_amt(r["신고발행금액"]))
+    with c2:
+        _small_field("발행일", "{:%Y-%m-%d}".format(r["발행일"]) if has_date(r["발행일"]) else "미정")
+        _small_field("최대발행가능액", fmt_amt(r["최대발행가능액"]))
 
     st.markdown("**만기**: {}".format(r["만기"] or "-"))
     st.markdown("**물량**: {}".format(r["물량"] or "-"))
@@ -906,6 +923,11 @@ div[class*="st-key-calday_"] div[data-testid="stPopover"],
 div[class*="st-key-calday_"] div[data-testid="stElementContainer"] {
     margin-bottom: 0 !important;
 }
+/* 발행사 클릭 시 뜨는 상세 팝업 패널: 기본 크기의 절반 수준으로 축소 */
+div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] {
+    width: 230px !important;
+    max-width: 230px !important;
+}
 /* 이전/오늘/다음 버튼: 테두리 제거, 밀도 있게 */
 div[class*="st-key-bsch_prev"] button,
 div[class*="st-key-bsch_today"] button,
@@ -918,6 +940,10 @@ div[class*="st-key-bsch_prev"] button:hover,
 div[class*="st-key-bsch_today"] button:hover,
 div[class*="st-key-bsch_next"] button:hover {
     background: rgba(49,51,63,0.06) !important;
+}
+/* 다가오는 일정 카드: 창이 커져도 일정 폭 이상 늘어나지 않도록 상한 지정 */
+div[class*="st-key-updeal_"] {
+    max-width: 720px !important;
 }
 </style>
 """
@@ -977,9 +1003,10 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
                         nm = str(r["종목명"])[:8]
                         label = "{}{} {}".format("📤" if kind == "issue" else "", emoji, nm)
                         pop_key = "cal_{}_{}_{}".format(day.isoformat(), kind, r.name)
-                        with st.popover(label, width="stretch", key="calpop_{}".format(pop_key)):
+                        pop_key_full = "calpop_{}".format(pop_key)
+                        with st.popover(label, width="stretch", key=pop_key_full):
                             st.caption(amt)
-                            _render_deal_detail_body(st, r, btn_key="goto_" + pop_key)
+                            _render_deal_detail_body(st, r, btn_key="goto_" + pop_key, popover_key=pop_key_full)
         d += dt.timedelta(days=7)
 
     st.markdown(
@@ -1029,7 +1056,7 @@ def render_page(st, read_history):
     m3.metric("향후 7일 신고금액", fmt_amt(soon["신고발행금액"].sum()))
     m4.metric("향후 7일 최대발행", fmt_amt(soon["최대발행가능액"].sum()))
 
-    tab_cal, tab_list, tab_up = st.tabs(["🗓 캘린더", "📋 목록", "⏭ 다가오는 일정"])
+    tab_cal, tab_up = st.tabs(["🗓 캘린더", "⏭ 다가오는 일정"])
 
     with tab_cal:
         if "bsch_ym" not in st.session_state:
@@ -1057,21 +1084,6 @@ def render_page(st, read_history):
         render_month_calendar(st, cal_view, y, m, show_issue)
         st.caption("칩을 클릭하면 새로고침 없이 옆에 상세정보가 뜹니다.")
 
-    with tab_list:
-        show = view.sort_values(["수요예측일", "발행일"], na_position="last")
-        st.dataframe(
-            show, width="stretch", hide_index=True, height=560,
-            column_config={
-                "수요예측일": st.column_config.DateColumn(format="YYYY-MM-DD", width="small"),
-                "발행일": st.column_config.DateColumn(format="YYYY-MM-DD", width="small"),
-                "신고발행금액": st.column_config.NumberColumn("신고(억)", format="%d"),
-                "최대발행가능액": st.column_config.NumberColumn("최대(억)", format="%d"),
-            })
-        st.download_button("⬇ 현재 목록 CSV 저장",
-                           show.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="수요예측일정_{:%y%m%d}.csv".format(today),
-                           mime="text/csv", key="bsch_dl")
-
     with tab_up:
         up = view[view["수요예측일"].map(lambda d: has_date(d) and d >= today)]
         up = up.sort_values("수요예측일")
@@ -1083,7 +1095,7 @@ def render_page(st, read_history):
             st.markdown("#### {:%m/%d} ({}) · {}".format(d, WEEKDAYS[d.weekday()], tag))
             for _, r in grp.iterrows():
                 color = rating_color(r["신용등급"])
-                with st.container(border=True):
+                with st.container(border=True, key="updeal_{}".format(r.name)):
                     a, b = st.columns([3, 5])
                     a.markdown(
                         "**{}** &nbsp;<span style='background:{};color:#fff;padding:1px 7px;"
