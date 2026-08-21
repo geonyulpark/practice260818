@@ -695,6 +695,45 @@ def fetch_market_disclosures(api_key: str, days: int = 3, max_pages: int = 15):
     return all_items, None
 
 
+@st.cache_data(ttl=60 * 10)
+def fetch_dart_rss_disclosures():
+    """DART '오늘의공시' RSS(인증키 불필요)를 가져와 파싱.
+    list.json과 달리 인증키가 필요 없고 점검 중에도 살아있을 수 있지만,
+    최신 소수건(오늘 위주)만 제공하는 가벼운 대체 수단이라 조회기간(N일) 설정은 적용되지 않는다.
+    반환값 형태를 list.json과 동일하게(corp_name/report_nm/rcept_dt/rcept_no) 맞춰서
+    아래 페이지의 필터링 코드를 그대로 재사용할 수 있게 한다."""
+    url = "https://dart.fss.or.kr/api/todayRSS.xml"
+    try:
+        resp = requests.get(url, timeout=15)
+        root = ET.fromstring(resp.content)
+    except Exception as e:
+        return [], f"RSS 요청 오류: {e}"
+
+    items = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+
+        m = re.match(r"^\(([^)]+)\)(.+?) - (.+)$", title)
+        if m:
+            corp_name, report_nm = m.group(2).strip(), m.group(3).strip()
+        else:
+            corp_name, report_nm = "", title
+
+        rcpno_match = re.search(r"rcpNo=(\d+)", link)
+        rcept_no = rcpno_match.group(1) if rcpno_match else ""
+        # rcpNo 앞 8자리가 곧 접수일자(YYYYMMDD)라 별도 날짜 파싱 없이 그대로 활용
+        rcept_dt = rcept_no[:8] if len(rcept_no) >= 8 else ""
+
+        items.append({
+            "corp_name": corp_name,
+            "report_nm": report_nm,
+            "rcept_dt": rcept_dt,
+            "rcept_no": rcept_no,
+        })
+    return items, None
+
+
 @st.cache_data(ttl=60 * 60 * 24)
 def fetch_financials_detail(corp_code: str, api_key: str):
     """'발행사별 상세보기' 전용 상세 재무제표 조회.
@@ -2253,15 +2292,28 @@ elif page == "최근공시":
             st.write("")
             if st.button("새로고침", key="disclosure_refresh"):
                 fetch_market_disclosures.clear()
+                fetch_dart_rss_disclosures.clear()
 
         with st.spinner("DART에서 최근공시를 조회하는 중입니다 (조회 기간이 길수록 오래 걸릴 수 있습니다)..."):
             all_disclosures, fetch_err = fetch_market_disclosures(DART_API_KEY, days=int(days))
 
+        used_rss_fallback = False
         if fetch_err:
-            st.error(f"최근공시를 가져오지 못했습니다. {fetch_err}")
+            st.warning(f"정식 API 조회 실패: {fetch_err}")
+            with st.spinner("인증키가 필요 없는 RSS 방식(오늘 공시 위주)으로 대신 시도합니다..."):
+                all_disclosures, rss_err = fetch_dart_rss_disclosures()
+            if rss_err or not all_disclosures:
+                st.error(f"RSS 방식도 실패했습니다: {rss_err or '데이터가 없습니다.'}")
+            else:
+                used_rss_fallback = True
+
+        if fetch_err and not used_rss_fallback:
+            pass  # 둘 다 실패 — 위에서 이미 오류 메시지를 보여줌
         elif not all_disclosures:
             st.info("이 기간에는 시장 전체에 공시가 없습니다 (주말·공휴일 등).")
         else:
+            if used_rss_fallback:
+                st.info("⚠️ 지금은 RSS 방식으로 대체 조회 중입니다 — 오늘 공시 최신 20여 건만 포함되며, 조회기간(N일) 설정은 적용되지 않습니다.")
             st.caption(f"시장 전체 공시 {len(all_disclosures)}건 중, 별칭 표에 등록된 회사만 아래에 표시합니다.")
 
             alias_full_for_disclosure = load_issuer_aliases_full()
