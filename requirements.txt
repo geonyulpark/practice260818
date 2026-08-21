@@ -5,4 +5,5 @@ openpyxl
 requests
 gspread
 google-auth
-xlrd
+altair
+pdfplumber
