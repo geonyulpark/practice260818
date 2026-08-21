@@ -869,14 +869,40 @@ def _render_deal_detail_body(st, r, btn_key):
         st.rerun()
 
 
+WEEKDAYS_SUN_FIRST = ["일", "월", "화", "수", "목", "금", "토"]
+
+_CAL_CSS = """
+<style>
+/* 캘린더 영역: 각진 모서리, 칸 사이 간격 제거, 버튼 왼쪽정렬 */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 0 !important;
+    border-color: #d0d5dd !important;
+}
+[data-testid="stMain"] [data-testid="stHorizontalBlock"] {
+    gap: 0 !important;
+}
+[data-testid="stMain"] div[data-testid="stPopover"] button,
+[data-testid="stMain"] div[data-testid="stPopover"] button p {
+    border-radius: 0 !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+}
+</style>
+"""
+
+
 def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issue: bool):
     """st.columns + st.popover로 그리는 네이티브 캘린더.
     칩(버튼)을 클릭하면 새로고침 없이 그 옆에 상세 팝업이 뜬다.
-    HTML 그리드(month_grid)보다는 성기지만, 클릭 상호작용이 필요해 이 방식을 쓴다."""
+    HTML 그리드(month_grid)보다는 성기지만, 클릭 상호작용이 필요해 이 방식을 쓴다.
+    일요일이 첫 열이다."""
+    st.markdown(_CAL_CSS, unsafe_allow_html=True)
+
     first = dt.date(year, month, 1)
-    start = first - dt.timedelta(days=first.weekday())
+    # 파이썬 weekday()는 월=0..일=6 이라, 일요일을 기준으로 한 주의 시작을 다시 계산한다
+    start = first - dt.timedelta(days=(first.weekday() + 1) % 7)
     last = dt.date(year, month, calendar.monthrange(year, month)[1])
-    end = last + dt.timedelta(days=6 - last.weekday())
+    end = last + dt.timedelta(days=(5 - last.weekday()) % 7)
     today = dt.date.today()
 
     by_day = {}
@@ -887,8 +913,8 @@ def render_month_calendar(st, df: pd.DataFrame, year: int, month: int, show_issu
             by_day.setdefault(r["발행일"], []).append(("issue", r))
 
     head_cols = st.columns(7)
-    for i, w in enumerate(WEEKDAYS):
-        color = "#2563eb" if i == 5 else "#dc2626" if i == 6 else "#475569"
+    for i, w in enumerate(WEEKDAYS_SUN_FIRST):
+        color = "#dc2626" if i == 0 else "#2563eb" if i == 6 else "#475569"
         head_cols[i].markdown(
             "<div style='text-align:center;font-weight:600;font-size:.82rem;color:{}'>{}</div>".format(color, w),
             unsafe_allow_html=True)
