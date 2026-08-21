@@ -16,7 +16,7 @@ st.title("🧭 Compass")
 DART_API_KEY = st.secrets.get("DART_API_KEY", "")
 
 
-NAV_VIEW_PAGES = ["채권 스프레드", "신용등급 트리거", "익스포저", "발행사별 상세보기"]
+NAV_VIEW_PAGES = ["채권 스프레드", "신용등급 트리거", "익스포저", "최근공시", "발행사별 상세보기"]
 NAV_ADMIN_PAGES = ["데이터 업로드", "관리자 설정"]
 
 if "nav_page" not in st.session_state:
@@ -651,6 +651,38 @@ def fetch_company_overview(corp_code: str, api_key: str):
     if data.get("status") != "000":
         return None
     return data
+
+
+@st.cache_data(ttl=60 * 30)
+def fetch_market_disclosures(api_key: str, days: int = 3, max_pages: int = 15):
+    """DART 공시검색(list.json)으로 최근 N일간 시장 전체 공시 목록을 페이지네이션으로 가져온다.
+    회사를 특정하지 않고 시장 전체를 가져온 뒤, 우리 쪽에서 등록된 발행사만 걸러내는 방식이
+    (등록된 발행사마다 개별 조회하는 것보다) API 호출 수 측면에서 훨씬 효율적이다."""
+    end_date = datetime.date.today()
+    start_date = end_date - datetime.timedelta(days=days)
+    url = "https://opendart.fss.or.kr/api/list.json"
+    all_items = []
+    for page in range(1, max_pages + 1):
+        params = {
+            "crtfc_key": api_key,
+            "bgn_de": start_date.strftime("%Y%m%d"),
+            "end_de": end_date.strftime("%Y%m%d"),
+            "page_no": page,
+            "page_count": 100,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            data = resp.json()
+        except Exception:
+            break
+        if data.get("status") != "000":
+            break
+        items = data.get("list", [])
+        all_items.extend(items)
+        total_page = data.get("total_page", 1)
+        if page >= total_page:
+            break
+    return all_items
 
 
 @st.cache_data(ttl=60 * 60 * 24)
@@ -2187,6 +2219,91 @@ elif page == "익스포저":
                         data=view.to_csv(index=False).encode("utf-8-sig"),
                         file_name=f"위너스익스포저_{q_date}.csv", mime="text/csv"
                     )
+
+# ==============================================================
+# 페이지: 최근공시 (조회)
+# ==============================================================
+elif page == "최근공시":
+    st.header("최근공시")
+    st.caption(
+        "DART 전체 시장 최근공시 중, 발행사명 별칭 표에 표준명이 등록되어 있는 회사의 공시만 걸러서 보여줍니다. "
+        "등록이 안 된 회사의 공시는 여기 나타나지 않습니다 — 관리자 탭에서 먼저 별칭을 등록해주세요."
+    )
+
+    if not DART_API_KEY:
+        st.warning(
+            "DART API 키가 설정되어 있지 않습니다. Streamlit Cloud Secrets에 "
+            "DART_API_KEY = \"발급받은키\" 를 등록해주세요."
+        )
+    else:
+        col_days, col_refresh = st.columns([1, 2])
+        with col_days:
+            days = st.number_input("조회 기간 (최근 N일)", min_value=1, max_value=30, value=3, key="disclosure_days")
+        with col_refresh:
+            st.write("")
+            if st.button("새로고침", key="disclosure_refresh"):
+                fetch_market_disclosures.clear()
+
+        with st.spinner("DART에서 최근공시를 조회하는 중입니다 (조회 기간이 길수록 오래 걸릴 수 있습니다)..."):
+            all_disclosures = fetch_market_disclosures(DART_API_KEY, days=int(days))
+
+        if not all_disclosures:
+            st.info("최근공시를 가져오지 못했습니다. 기간을 조정하거나 잠시 후 다시 시도해주세요.")
+        else:
+            st.caption(f"시장 전체 공시 {len(all_disclosures)}건 중, 별칭 표에 등록된 회사만 아래에 표시합니다.")
+
+            alias_full_for_disclosure = load_issuer_aliases_full()
+            dart_name_to_standard = {}
+            if not alias_full_for_disclosure.empty and "표준명" in alias_full_for_disclosure.columns:
+                for _, row in alias_full_for_disclosure.iterrows():
+                    std = str(row.get("표준명", "")).strip()
+                    if not std:
+                        continue
+                    dart_name = str(row.get("DART", "")).strip() if "DART" in alias_full_for_disclosure.columns else ""
+                    if dart_name:
+                        dart_name_to_standard[dart_name] = std
+                    dart_name_to_standard.setdefault(std, std)  # DART열이 비어있으면 표준명 자체로도 매칭 시도
+
+            filtered_rows = []
+            for item in all_disclosures:
+                corp_name = (item.get("corp_name") or "").strip()
+                std_name = dart_name_to_standard.get(corp_name)
+                if not std_name:
+                    continue
+                rcept_no = item.get("rcept_no", "")
+                rcept_dt = item.get("rcept_dt", "")
+                rcept_dt_fmt = f"{rcept_dt[:4]}-{rcept_dt[4:6]}-{rcept_dt[6:8]}" if len(rcept_dt) == 8 else rcept_dt
+                filtered_rows.append({
+                    "일자": rcept_dt_fmt,
+                    "표준명": std_name,
+                    "공시대상회사": corp_name,
+                    "보고서명": item.get("report_nm", ""),
+                    "링크": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}" if rcept_no else None,
+                })
+
+            if not filtered_rows:
+                st.info("이 기간에는 별칭 표에 등록된 회사의 공시가 없습니다.")
+            else:
+                disclosure_df = pd.DataFrame(filtered_rows).sort_values("일자", ascending=False)
+
+                search_disclosure = st.text_input("표준명으로 필터 (선택사항)", key="disclosure_search")
+                if search_disclosure:
+                    disclosure_df = disclosure_df[disclosure_df["표준명"].str.contains(search_disclosure, na=False)]
+
+                st.subheader(f"공시 목록 ({len(disclosure_df)}건)")
+                st.dataframe(
+                    disclosure_df,
+                    use_container_width=True, hide_index=True, height=450,
+                    column_config={
+                        "링크": st.column_config.LinkColumn("링크", display_text="보고서 열기"),
+                    },
+                )
+
+                st.download_button(
+                    "결과 CSV 다운로드",
+                    data=disclosure_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"최근공시_{datetime.date.today().strftime('%Y%m%d')}.csv", mime="text/csv"
+                )
 
 # ==============================================================
 # 페이지: 발행사별 상세보기 (조회)
