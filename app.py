@@ -9,6 +9,7 @@ import datetime
 import xml.etree.ElementTree as ET
 import gspread
 from google.oauth2.service_account import Credentials
+from google.cloud import bigquery
 import bond_schedule
 
 st.set_page_config(page_title="Compass", layout="wide")
@@ -105,6 +106,39 @@ def get_gsheet_client():
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=GOOGLE_SHEETS_SCOPES)
     return gspread.authorize(creds)
+
+
+def get_bigquery_client():
+    """구글 서비스 계정으로 인증된 BigQuery 클라이언트 반환. Sheets용과 같은 서비스 계정을 쓰되,
+    BigQuery 전용 스코프로 다시 인증한다 (IAM에서 BigQuery 데이터 편집자·작업 사용자 역할이 필요)."""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(
+        creds_dict, scopes=["https://www.googleapis.com/auth/bigquery"]
+    )
+    return bigquery.Client(credentials=creds, project=creds_dict.get("project_id"))
+
+
+def upload_companies_to_bigquery(vs_df: pd.DataFrame, dataset_id: str = "compass_findata", table_id: str = "companies"):
+    """VALUESearch 기업목록 전체를 BigQuery companies 테이블에 통째로 적재 (매번 전체 교체).
+    이 테이블은 '현재 시점 기업 마스터' 스냅샷이라 누적하지 않고 매번 덮어쓴다."""
+    client = get_bigquery_client()
+    df = vs_df.copy().rename(columns={
+        "업체코드": "nice_code",
+        "종목코드": "stock_code",
+        "종목명": "corp_name",
+        "업체명(정식)": "corp_name_formal",
+        "법인번호": "corp_reg_no",
+    })
+    for col in ["nice_code", "stock_code", "corp_name", "corp_name_formal", "corp_reg_no"]:
+        df[col] = df[col].astype(str).replace({"nan": None, "None": None})
+    df["is_listed"] = df["stock_code"].notna() & (df["stock_code"] != "None")
+    df["updated_at"] = pd.Timestamp.now("UTC")
+
+    table_ref = f"{client.project}.{dataset_id}.{table_id}"
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    job = client.load_table_from_dataframe(df, table_ref, job_config=job_config)
+    job.result()  # 완료될 때까지 대기 (실패 시 여기서 예외 발생)
+    return len(df)
 
 
 def append_history(df: pd.DataFrame, worksheet_name: str, date_str: str, date_col: str = "업데이트일자"):
@@ -3151,12 +3185,16 @@ elif page == "관리자 설정":
                         st.error(f"저장 중 오류가 발생했습니다: {e}")
 
         st.markdown("---")
-        st.subheader("VALUESearch 기업명·업체코드 일괄 매칭")
+        st.subheader("VALUESearch 기업목록 업로드 (BigQuery 적재 + 별칭 매칭)")
         st.caption(
-            "VALUESearch에서 Massive Download로 받은 기업목록(업체코드/종목명/업체명/법인번호) 엑셀을 올리면, "
-            "별칭 표의 표준명과 자동으로 매칭해 'VALUESearch' 열과 'NICE업체코드' 열을 함께 채웁니다. "
-            "DART와 달리 실시간 API가 아니라 업로드한 파일 안에서만 찾으므로, 최신 목록이 필요하면 "
-            "VALUESearch에서 다시 받아서 올려주세요."
+            "VALUESearch에서 Massive Download로 받은 기업목록(업체코드/종목명/업체명/법인번호) 엑셀을 "
+            "한 번 올리면 두 가지가 동시에 처리됩니다:\n\n"
+            "1) **BigQuery `companies` 테이블에 전체(외감 포함)를 통째로 적재** — 나중에 전체 기업 대비 "
+            "퍼센타일 분석 등에 쓰일 기업 마스터입니다. 매번 통째로 최신 상태로 교체됩니다.\n\n"
+            "2) **회사채 발행사 별칭 표(표준명)와 매칭** — 지금 관리 중인 발행사에 한해서만 "
+            "'VALUESearch' 열과 'NICE업체코드' 열을 채웁니다. 표준명이 없는 회사는(대부분의 외감기업이 "
+            "여기 해당) 별칭 표에는 추가되지 않습니다 — 별칭 표는 회사채 관련 표기 통일용이고, "
+            "전체 기업 마스터는 BigQuery 쪽이 담당하기 때문입니다."
         )
         vs_company_file = st.file_uploader(
             "VALUESearch 기업목록 엑셀 업로드", type=["xlsx"], key="vs_company_list_upload"
@@ -3167,9 +3205,23 @@ elif page == "관리자 설정":
                 st.error(vs_err)
             else:
                 st.caption(f"VALUESearch 기업목록 {len(vs_parsed):,}개사를 확인했습니다.")
-                if st.button("VALUESearch 목록으로 매칭", key="vs_match_btn"):
-                    vs_lookup = build_valuesearch_lookup(vs_parsed)
+                if st.button("BigQuery 적재 + 별칭 매칭 실행", key="vs_upload_btn"):
+                    # 1) BigQuery companies 테이블에 전체 적재
+                    with st.spinner(f"BigQuery에 {len(vs_parsed):,}개사를 적재하는 중입니다..."):
+                        try:
+                            n_loaded = upload_companies_to_bigquery(vs_parsed)
+                            st.success(f"BigQuery `companies` 테이블에 {n_loaded:,}개사를 적재했습니다.")
+                        except Exception as e:
+                            st.error(
+                                f"BigQuery 적재 중 오류가 발생했습니다: {e}\n\n"
+                                "- BigQuery API가 활성화되어 있는지\n"
+                                "- 서비스 계정에 'BigQuery 데이터 편집자'·'BigQuery 작업 사용자' 역할이 있는지\n"
+                                "- `compass_findata` 데이터셋이 만들어져 있는지\n"
+                                "확인해주세요. (BigQuery 적재가 실패해도 아래 별칭 매칭은 계속 진행됩니다.)"
+                            )
 
+                    # 2) 회사채 발행사 별칭 표 매칭 (기존 로직)
+                    vs_lookup = build_valuesearch_lookup(vs_parsed)
                     alias_df_for_vs = load_issuer_aliases_full()
                     if alias_df_for_vs.empty or "표준명" not in alias_df_for_vs.columns:
                         st.info("별칭 표에 등록된 회사가 아직 없습니다. 먼저 위쪽에서 회사를 추가해주세요.")
@@ -3198,12 +3250,12 @@ elif page == "관리자 설정":
                                 })
 
                         st.session_state["vs_match_preview"] = updated_vs
-                        st.success(f"{matched_count_vs}개 회사에 새로 VALUESearch 회사명/업체코드를 채웠습니다 (기존에 값이 있던 칸은 건드리지 않았습니다).")
+                        st.success(f"별칭 표: {matched_count_vs}개 회사에 새로 VALUESearch 회사명/업체코드를 채웠습니다 (기존 값은 안 건드림).")
                         if filled_rows_vs:
                             st.dataframe(pd.DataFrame(filled_rows_vs), use_container_width=True, hide_index=True)
 
         if "vs_match_preview" in st.session_state:
-            st.markdown("**매칭 결과 미리보기 (VALUESearch·NICE업체코드 열 반영됨)**")
+            st.markdown("**별칭 표 매칭 결과 미리보기 (VALUESearch·NICE업체코드 열 반영됨)**")
             st.dataframe(st.session_state["vs_match_preview"], use_container_width=True, hide_index=True, height=300)
             if st.button("이 매칭 결과 저장", key="save_vs_match_btn"):
                 try:
