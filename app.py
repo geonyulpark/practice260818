@@ -390,6 +390,67 @@ def create_financial_ratios_view(dataset_id: str = "compass_findata",
     return view_ref
 
 
+# 지표명 -> "값이 클수록 좋은가"(True) / "작을수록 좋은가"(False)
+_RATIO_DIRECTION = {
+    "이자보상배율": True,
+    "순차입금_EBITDA배율": False,
+    "부채비율": False,
+    "차입금의존도": False,
+    "유동비율": True,
+    "영업이익률": True,
+    "순이익률": True,
+    "ROE": True,
+    "매출액증가율": True,
+}
+
+
+def create_financial_percentiles_view(dataset_id: str = "compass_findata",
+                                       ratios_view: str = "financial_ratios",
+                                       view_name: str = "financial_percentiles"):
+    """financial_ratios의 9개 지표를 같은 (연도, 기간구분, 연결/별도) 안에서 서로 비교해
+    백분위(0~100)를 매기는 뷰를 만든다. '퍼센타일이 높을수록 재무적으로 더 양호하다'로
+    방향을 통일한다 — 부채비율·차입금의존도·순차입금/EBITDA배율처럼 낮을수록 좋은 지표는
+    정렬 방향을 뒤집어서 계산한다.
+    지표마다 값이 있는 회사만 따로 모아 계산한다 — 결측치가 섞인 채로 한 번에 계산하면
+    다른 회사들의 순위(분모)까지 왜곡되기 때문에, 지표별 서브쿼리로 나눠서 LEFT JOIN한다."""
+    client = get_bigquery_client()
+    ratios_ref = f"{client.project}.{dataset_id}.{ratios_view}"
+    view_ref = f"{client.project}.{dataset_id}.{view_name}"
+
+    ctes, joins, select_cols = [], [], []
+    for i, (metric, higher_is_better) in enumerate(_RATIO_DIRECTION.items(), start=1):
+        alias = f"pct{i}"
+        order_dir = "ASC" if higher_is_better else "DESC"
+        pct_col = f"{metric}_퍼센타일"
+        ctes.append(f"""
+    {alias} AS (
+      SELECT nice_code, fiscal_year, period_type, basis,
+        ROUND(PERCENT_RANK() OVER (
+          PARTITION BY fiscal_year, period_type, basis ORDER BY `{metric}` {order_dir}
+        ) * 100, 1) AS `{pct_col}`
+      FROM `{ratios_ref}`
+      WHERE `{metric}` IS NOT NULL
+    )""")
+        joins.append(
+            f"LEFT JOIN {alias} USING (nice_code, fiscal_year, period_type, basis)"
+        )
+        select_cols.append(f"{alias}.`{pct_col}`")
+
+    # f-string 표현식 안에 \n을 직접 쓰면 구버전 파이썬에서 문법 오류가 나서 미리 변수로 뺌
+    select_cols_sql = ",\n      ".join(select_cols)
+    ddl = f"""
+    CREATE OR REPLACE VIEW `{view_ref}` AS
+    WITH {",".join(ctes)}
+    SELECT
+      base.*,
+      {select_cols_sql}
+    FROM `{ratios_ref}` AS base
+    {" ".join(joins)}
+    """
+    client.query(ddl).result()
+    return view_ref
+
+
 def append_history(df: pd.DataFrame, worksheet_name: str, date_str: str, date_col: str = "업데이트일자"):
     """df를 지정한 워크시트에 날짜열과 함께 이력으로 쌓는다.
     같은 날짜(date_str) 데이터가 이미 있으면 먼저 지우고 새로 씀 (재업로드시 중복 방지)."""
@@ -3594,6 +3655,35 @@ elif page == "관리자 설정":
                     client = get_bigquery_client()
                     preview_df = client.query(
                         "SELECT * FROM `{}.compass_findata.financial_ratios` "
+                        "ORDER BY fiscal_year DESC LIMIT 20".format(client.project)
+                    ).to_dataframe()
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.error(f"미리보기 조회 중 오류가 발생했습니다: {e} (먼저 위 버튼으로 뷰를 생성해주세요)")
+
+        st.markdown("---")
+        st.subheader("전체 기업 대비 퍼센타일 뷰 생성/갱신")
+        st.caption(
+            "`financial_ratios`의 9개 지표를 같은 (연도, 기간구분, 연결/별도) 안에서 외감 전체와 "
+            "비교해 백분위(0~100)를 매기는 뷰(`financial_percentiles`)를 만듭니다. "
+            "**퍼센타일이 높을수록 재무적으로 더 양호**하도록 통일했습니다 — 부채비율·차입금의존도·"
+            "순차입금/EBITDA배율처럼 낮을수록 좋은 지표는 방향을 뒤집어서 계산합니다. "
+            "`financial_ratios` 뷰가 먼저 만들어져 있어야 합니다."
+        )
+        if st.button("financial_percentiles 뷰 생성/갱신", key="create_percentiles_view_btn"):
+            with st.spinner("뷰를 생성하는 중입니다 (지표 9개를 각각 계산해서 합치느라 다소 걸릴 수 있습니다)..."):
+                try:
+                    view_ref = create_financial_percentiles_view()
+                    st.success(f"뷰를 생성/갱신했습니다: `{view_ref}`")
+                except Exception as e:
+                    st.error(f"뷰 생성 중 오류가 발생했습니다: {e}")
+
+        if st.button("financial_percentiles 뷰 미리보기 (상위 20건)", key="preview_percentiles_view_btn"):
+            with st.spinner("조회하는 중입니다..."):
+                try:
+                    client = get_bigquery_client()
+                    preview_df = client.query(
+                        "SELECT * FROM `{}.compass_findata.financial_percentiles` "
                         "ORDER BY fiscal_year DESC LIMIT 20".format(client.project)
                     ).to_dataframe()
                     st.dataframe(preview_df, use_container_width=True, hide_index=True)
