@@ -7,3 +7,5 @@ gspread
 google-auth
 altair
 pdfplumber
+google-cloud-bigquery
+db-dtypes
