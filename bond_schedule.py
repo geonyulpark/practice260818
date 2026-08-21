@@ -909,10 +909,10 @@ WEEKDAYS_SUN_FIRST = ["일", "월", "화", "수", "목", "금", "토"]
 
 _CAL_CSS = """
 <style>
-/* 날짜 칸: 가로·세로 격자선(각 칸에 얇은 테두리), 정사각형에 가깝도록 최소 높이 부여 */
+/* 날짜 칸: 테두리 없음, 정사각형에 가깝도록 최소 높이 부여 */
 div[class*="st-key-calday_"] {
     border-radius: 0 !important;
-    border: 1px solid #d0d5dd !important;
+    border: none !important;
     padding: 6px 8px !important;
     min-height: 100px !important;
 }
@@ -941,10 +941,6 @@ div[class*="st-key-calday_"] [data-testid="stVerticalBlock"] {
 div[class*="st-key-calday_"] div[data-testid="stPopover"],
 div[class*="st-key-calday_"] div[data-testid="stElementContainer"] {
     margin-bottom: 0 !important;
-}
-/* 캘린더 전체: 창이 넓어져도 가로 폭이 무한정 늘어나지 않도록 상한을 둠 */
-div[class*="st-key-calgrid_wrap"] {
-    max-width: 900px !important;
 }
 /* 발행사 클릭 시 뜨는 상세 팝업 패널: 더 작게, 상단 여백도 최소화해서 밀도 있게 */
 div[class*="st-key-calpop_"] div[data-testid="stPopoverBody"] {
