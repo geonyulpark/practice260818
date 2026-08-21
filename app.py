@@ -25,6 +25,34 @@ if "nav_page" not in st.session_state:
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
+st.markdown("""
+<style>
+[data-testid="stSidebar"] button {
+    text-align: left !important;
+    justify-content: flex-start !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-radius: 4px !important;
+    padding: 0.55rem 0.75rem !important;
+}
+[data-testid="stSidebar"] button p {
+    text-align: left !important;
+    font-size: 1.05rem !important;
+}
+[data-testid="stSidebar"] button:hover {
+    background: rgba(49,51,63,0.06) !important;
+}
+[data-testid="stSidebar"] button[kind="primary"] {
+    background: rgba(224,49,49,0.10) !important;
+}
+[data-testid="stSidebar"] button[kind="primary"] p {
+    color: #e03131 !important;
+    font-weight: 600 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 with st.sidebar:
     for _p in NAV_VIEW_PAGES:
         if st.button(_p, key=f"nav_btn_{_p}", use_container_width=True,
