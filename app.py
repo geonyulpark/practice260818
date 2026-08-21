@@ -318,14 +318,14 @@ def get_financial_statements_summary(dataset_id: str = "compass_findata", table_
     client = get_bigquery_client()
     table_ref = f"{client.project}.{dataset_id}.{table_id}"
     query = f"""
-        SELECT fiscal_year AS 연도, period_type AS 기간구분, basis AS 연결별도,
-               COUNT(DISTINCT nice_code) AS 회사수,
-               COUNT(DISTINCT account_code) AS 계정수,
-               COUNT(*) AS 총행수,
-               MAX(loaded_at) AS 최근적재시각
+        SELECT fiscal_year AS `연도`, period_type AS `기간구분`, basis AS `연결별도`,
+               COUNT(DISTINCT nice_code) AS `회사수`,
+               COUNT(DISTINCT account_code) AS `계정수`,
+               COUNT(*) AS `총행수`,
+               MAX(loaded_at) AS `최근적재시각`
         FROM `{table_ref}`
-        GROUP BY 연도, 기간구분, 연결별도
-        ORDER BY 연도 DESC, 기간구분, 연결별도
+        GROUP BY `연도`, `기간구분`, `연결별도`
+        ORDER BY `연도` DESC, `기간구분`, `연결별도`
     """
     try:
         return client.query(query).to_dataframe(), None
