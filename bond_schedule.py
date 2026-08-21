@@ -1093,14 +1093,6 @@ def render_page(st, read_history):
     if query:
         view = view[view["종목명"].str.contains(query, case=False, na=False)]
 
-    wk_end = today + dt.timedelta(days=7)
-    soon = view[view["수요예측일"].map(lambda d: has_date(d) and today <= d <= wk_end)]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("표시 중인 딜", "{:,}건".format(len(view)))
-    m2.metric("향후 7일 수요예측", "{}건".format(len(soon)))
-    m3.metric("향후 7일 신고금액", fmt_amt(soon["신고발행금액"].sum()))
-    m4.metric("향후 7일 최대발행", fmt_amt(soon["최대발행가능액"].sum()))
-
     tab_cal, tab_up = st.tabs(["🗓 캘린더", "⏭ 다가오는 일정"])
 
     with tab_cal:
