@@ -873,11 +873,12 @@ WEEKDAYS_SUN_FIRST = ["일", "월", "화", "수", "목", "금", "토"]
 
 _CAL_CSS = """
 <style>
-/* 날짜 칸: 각진 모서리, 얇은 격자선, 내용에 맞춰 자동으로 늘어남(고정 높이 없음) */
+/* 날짜 칸: 테두리 완전 제거, 정사각형에 가깝도록 최소 높이 부여, 내용 많으면 자동으로 더 늘어남 */
 div[class*="st-key-calday_"] {
     border-radius: 0 !important;
-    border: 1px solid #d0d5dd !important;
+    border: none !important;
     padding: 6px 8px !important;
+    min-height: 100px !important;
 }
 /* 요일/날짜 칸이 나열되는 가로줄 자체의 칸 사이 간격 제거 */
 [data-testid="stHorizontalBlock"] {
@@ -891,18 +892,32 @@ div[class*="st-key-calpop_"] button {
     text-align: left !important;
     justify-content: flex-start !important;
     padding: 1px 4px !important;
-    min-height: 1.6rem !important;
+    min-height: 1.5rem !important;
     font-size: .82rem !important;
 }
 div[class*="st-key-calpop_"] button p {
     text-align: left !important;
 }
-/* 팝오버 트리거들 사이 위아래 간격을 좁힘 */
-div[class*="st-key-calday_"] div[data-testid="stPopover"] {
-    margin-bottom: 0 !important;
+/* 팝오버 트리거들 사이 위아래 간격을 최대한 좁힘 (칸 내부 세로 블록 자체의 gap까지 제거) */
+div[class*="st-key-calday_"] [data-testid="stVerticalBlock"] {
+    gap: 0 !important;
 }
+div[class*="st-key-calday_"] div[data-testid="stPopover"],
 div[class*="st-key-calday_"] div[data-testid="stElementContainer"] {
     margin-bottom: 0 !important;
+}
+/* 이전/오늘/다음 버튼: 테두리 제거, 밀도 있게 */
+div[class*="st-key-bsch_prev"] button,
+div[class*="st-key-bsch_today"] button,
+div[class*="st-key-bsch_next"] button {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+div[class*="st-key-bsch_prev"] button:hover,
+div[class*="st-key-bsch_today"] button:hover,
+div[class*="st-key-bsch_next"] button:hover {
+    background: rgba(49,51,63,0.06) !important;
 }
 </style>
 """
@@ -1020,7 +1035,7 @@ def render_page(st, read_history):
         if "bsch_ym" not in st.session_state:
             st.session_state.bsch_ym = (today.year, today.month)
         y, m = st.session_state.bsch_ym
-        n1, n2, n3, n4 = st.columns([1, 1, 1, 6])
+        n1, n2, n3, n4 = st.columns([1, 1, 1, 9])
         if n1.button("◀ 이전", key="bsch_prev", width="stretch"):
             st.session_state.bsch_ym = (y - 1, 12) if m == 1 else (y, m - 1)
             st.rerun()
